@@ -1,7 +1,7 @@
 # ros2_vlm_vision
 
 Vision module for a VLM stack on ROS 2 Humble. Consumes the colour stream
-from a UVC webcam (Logitech C920 / C270 / Brio etc.) via `usb_cam`, runs
+from a UVC webcam (Logitech C920 / C270 / Brio etc.) via `v4l2_camera`, runs
 YOLOv8 on each frame, and back-projects detections to 3D using a
 class-size heuristic — i.e. for each known COCO class the node assumes a
 canonical real-world height and solves Z from the bbox vertical extent
@@ -33,7 +33,7 @@ in-browser visualisation.
 ## Pipeline
 
 ```
-Logitech UVC webcam ──► usb_cam
+Logitech UVC webcam ──► v4l2_camera (io_method=read, MJPG)
                             │
                             ├─ /image_raw       (sensor_msgs/Image)
                             └─ /camera_info     (sensor_msgs/CameraInfo)
@@ -46,6 +46,11 @@ Logitech UVC webcam ──► usb_cam
    ~/detections              ~/markers                    ~/debug_image
    (Detection3DArray)        (MarkerArray)                (annotated BGR)
 ```
+
+The capture node is resolved at launch time. By default (`video_device:=auto`)
+the launch picks a stable per-device symlink from `/dev/v4l/by-id/` matching
+the `device_name_match` substring (default `BRIO`), so `/dev/videoN`
+renumbering across replug / usbipd reattach is handled automatically.
 
 Distance is computed per detection as `Z = real_h_m * fy / bbox_h_px`,
 where `real_h_m` comes from [`utils/object_sizes.py`](ros2_vlm_vision/utils/object_sizes.py)
@@ -132,14 +137,32 @@ Foxglove WebSocket**, and connect to `ws://localhost:8765`. Useful panels:
 - **3D** panel → `/vlm_detector_node/markers`
 - **Raw Messages** panel → `/vlm_detector_node/detections`
 
-If your webcam enumerates capture on a node other than `/dev/video0`
-(common on multi-stream models like the Brio):
+**Picking the right capture node.** The Brio (and other multi-stream UVC
+cameras) exposes several `/dev/videoN` nodes, and the numbering changes
+on replug / usbipd reattach. The launch resolves this automatically:
 
 ```bash
+# Default: auto-detect via /dev/v4l/by-id/, matching "BRIO" in the name.
+docker compose up vlm
+
+# Different camera (e.g. Logitech C920) -- change the name substring:
+docker compose run --rm vlm \
+    ros2 launch ros2_vlm_vision vision_stack.launch.py \
+    device:=cpu device_name_match:=C920
+
+# Any UVC capture device (no name filter):
+docker compose run --rm vlm \
+    ros2 launch ros2_vlm_vision vision_stack.launch.py \
+    device:=cpu device_name_match:=
+
+# Force a specific node (skip auto-detection entirely):
 docker compose run --rm vlm \
     ros2 launch ros2_vlm_vision vision_stack.launch.py \
     device:=cpu video_device:=/dev/video2
 ```
+
+The chosen path is logged once at startup as
+`[ros2_vlm_vision] resolved video_device=/dev/v4l/by-id/usb-Logitech_BRIO_...-video-index0`.
 
 The default container runs CPU inference (`device:=cpu`). For NVIDIA GPU
 inference, swap the base image to a CUDA-enabled ROS Humble image, install
@@ -151,33 +174,37 @@ runtime reservation to the `vlm` service in `docker-compose.yml`.
 ```bash
 # System deps
 sudo apt install \
-    ros-humble-usb-cam \
+    ros-humble-v4l2-camera \
     ros-humble-vision-msgs ros-humble-cv-bridge \
     ros-humble-image-transport ros-humble-image-common \
+    ros-humble-image-proc ros-humble-apriltag-ros \
     ros-humble-camera-info-manager \
     ros-humble-tf2-ros ros-humble-tf2-geometry-msgs \
     ros-humble-foxglove-bridge python3-opencv v4l-utils
 
-# Python deps
-pip3 install ultralytics torch  # add --index-url https://download.pytorch.org/whl/cpu for CPU-only
+# Python deps. numpy is pinned because the apt-shipped cv_bridge boost
+# extension is built against the NumPy 1.x ABI.
+pip3 install 'numpy<2' 'opencv-python>=4.6,<4.13' ultralytics torch
+# add --index-url https://download.pytorch.org/whl/cpu for CPU-only torch
 
 # Build
 cd <ros2_ws>/src && ln -s /path/to/ros2_vlm_vision .
 cd .. && colcon build --packages-select ros2_vlm_vision
 source install/setup.bash
 
-# Confirm v4l2 sees the camera
+# Confirm v4l2 sees the camera. The launch's auto-detect prefers the
+# stable by-id symlinks; list them too if present.
 v4l2-ctl --list-devices
-v4l2-ctl -d /dev/video0 --list-formats-ext   # supported resolutions/fps
+ls /dev/v4l/by-id/ 2>/dev/null    # stable per-device names
 
 # Run
-ros2 launch ros2_vlm_vision vision_stack.launch.py            # GPU
+ros2 launch ros2_vlm_vision vision_stack.launch.py            # GPU, auto-detect device
 ros2 launch ros2_vlm_vision vision_stack.launch.py device:=cpu
 ros2 launch ros2_vlm_vision vision_stack.launch.py \
-    video_device:=/dev/video2 image_width:=1920 image_height:=1080
+    image_width:=1920 image_height:=1080
 ```
 
-If `usb_cam` is already running elsewhere, pass `launch_camera:=false`.
+If `v4l2_camera` is already running elsewhere, pass `launch_camera:=false`.
 
 ## Selecting target objects
 
@@ -347,12 +374,14 @@ the static TF in place, any tf2 listener (or Foxglove's 3D panel set to
 `world` as the display frame) sees the detections in world coordinates
 automatically.
 
-To plumb the calibrated intrinsics back into `usb_cam`, point its
-`camera_info_url` at the YAML you produced:
+The `intrinsic_calibration_node` writes to `camera_info/camera.yaml`,
+which is exactly where `v4l2_camera`'s `camera_info_url` already points by
+default — so the calibrated intrinsics get loaded automatically on the
+next `docker compose up vlm`. To use a calibration from a different path:
 
 ```bash
 ros2 launch ros2_vlm_vision vision_stack.launch.py \
-    camera_info_url:=file:///tmp/rgb_intrinsics.yaml
+    camera_info_url:=file:///root/.ros/camera_info/my_camera.yaml
 ```
 
 Run them through the dedicated compose service (it shares the same
@@ -368,7 +397,7 @@ docker compose --profile calibrate run --rm calibrate \
 Recommended order on a fresh setup:
 
 1. `docker compose run --rm tune` — adjust focus / exposure / white balance.
-2. `docker compose run --rm save-settings` — persist to `camera_info/camera_settings.txt`.
+2. `docker compose run --rm save-settings` — persist to `camera_info/v4l2_params.yaml`.
 3. `docker compose --profile calibrate run --rm calibrate` — produce intrinsics.
 4. `docker compose --profile viz up` — run the stack with both applied.
 
@@ -404,36 +433,70 @@ Detector ([config/detector.yaml](config/detector.yaml)):
 | `initial_target_classes` | `""`    | Startup filter; live overrides via `~/target_classes` |
 | `show_non_targets` | `true`        | Draw non-target detections faded in the debug image |
 
+Camera-driver controls live in
+[camera_info/v4l2_params.yaml](camera_info/v4l2_params.yaml) and are loaded
+into the `v4l2_camera` node at launch.
+
+Launch arguments (`vision_stack.launch.py --show-args` lists everything):
+
+| Argument            | Default                                              | Notes                                                |
+|---------------------|------------------------------------------------------|------------------------------------------------------|
+| `video_device`      | `auto`                                               | `auto` resolves via `/dev/v4l/by-id/`; or pass a literal `/dev/videoN`. |
+| `device_name_match` | `BRIO`                                               | Substring matched against by-id entries when auto-resolving. Empty = first capture device. |
+| `image_width`       | `1280`                                               | Must match a mode the camera supports.               |
+| `image_height`      | `720`                                                |                                                      |
+| `pixel_format`      | `MJPG`                                               | `YUYV` is the fallback for cameras without MJPG.     |
+| `io_method`         | `read`                                               | `read \| mmap \| userptr` — `read` is most portable. |
+| `camera_info_url`   | `file:///root/.ros/camera_info/camera.yaml`          | Intrinsic YAML; auto-loaded if present.              |
+| `launch_camera`     | `true`                                               | Set `false` if `v4l2_camera` is running externally.  |
+| `device`            | `cuda:0`                                             | Torch device for YOLOv8 (`cpu`, `cuda:0`, `mps`).    |
+
 Calibration parameters in [config/calibration.yaml](config/calibration.yaml).
-Launch-time arguments (`video_device`, `image_width`, `image_height`,
-`framerate`, `pixel_format`, `camera_info_url`, `device`, `launch_camera`)
-are documented in the `--show-args` output of the launch files.
 
 ## Troubleshooting
 
-**`Failed to open /dev/video0`.** USB isn't visible inside the container.
-From admin PowerShell: `usbipd list`, then `usbipd attach --wsl --busid
-<BUSID>`. The attach is lost on Windows reboot and after a physical unplug.
-Re-check with `lsusb` and `v4l2-ctl --list-devices` inside WSL.
+**`Failed opening device /dev/videoN: No such file or directory`.** The
+camera detached from WSL. From admin PowerShell: `usbipd list`, then
+`usbipd attach --wsl --busid <BUSID>`. The attach is lost on Windows
+reboot and after a physical unplug. Re-check with `lsusb` and
+`v4l2-ctl --list-devices` inside WSL.
+
+**`Failed opening device ...` even though `lsusb` shows the camera.** The
+device renumbered (the Brio in particular shuffles between `/dev/video0..3`
+across reattach). The launch's `video_device:=auto` default already
+handles this via `/dev/v4l/by-id/`; check the startup log for the
+`[ros2_vlm_vision] resolved video_device=...` line to see what got
+picked. If by-id symlinks are missing on your system, override with an
+explicit `video_device:=/dev/videoN`.
 
 **Webcam attaches but no `/dev/video*` appears.** The WSL2 kernel is too
 old to expose `uvcvideo`. Run `wsl --update` from PowerShell, then
 `wsl --shutdown` and restart.
 
-**`Select timeout, exiting...`** usb_cam started streaming but the
-kernel never delivered a frame. Usually a usbipd-win isochronous-transfer
-limitation. Try a lower resolution (`image_width:=640 image_height:=480`),
-make sure no other app on Windows is holding the camera, and update
-usbipd-win and WSL to the latest versions.
+**`Select timeout` / `topic hz` shows nothing on `/image_raw`.** The
+streaming layer is stuck — `v4l2_camera`'s `read()` is blocked waiting
+for a frame. Usually a usbipd-win isochronous-transfer limitation. Try a
+lower resolution (`image_width:=640 image_height:=480`), confirm no
+other app on Windows is holding the camera, and `wsl --update`. The
+detector's `/vlm_detector_node/active_targets` is latched and published
+at startup, so that should always be visible even when the camera is
+stuck — its absence indicates a process-level failure instead.
 
 **Capture starts but frames are corrupted / black.** The default pixel
-format is `mjpeg2rgb`. Some older Logitech models only stream `yuyv` —
-override with `pixel_format:=yuyv2rgb` (and use `image_width:=640
+format is `MJPG`. Some older Logitech models only stream `YUYV` —
+override with `pixel_format:=YUYV` (and use `image_width:=640
 image_height:=480` so it fits in USB bandwidth).
 
+**Autofocus / autoexposure won't stay off.** `v4l2_camera` declares
+every V4L2 control as a ROS parameter and pushes the parameter's
+default to the device on startup; setting controls via `v4l2-ctl -c` is
+silently overwritten. Edit `camera_info/v4l2_params.yaml` instead (or
+run `docker compose run --rm save-settings` after tuning).
+
 **Detections feel close/far by a constant factor.** Almost always wrong
-intrinsics — `usb_cam` defaults are placeholders. Run the intrinsic
-calibration and feed the result back via `camera_info_url:=file://...`.
+intrinsics — `v4l2_camera`'s default is a placeholder when no
+calibration YAML exists. Run the intrinsic calibration; the result
+auto-loads next start.
 
 **Distances are accurate for some classes but wildly off for others.**
 The size in `object_sizes.py` doesn't match what you're seeing. Edit it.
