@@ -6,16 +6,13 @@ intrinsic_calibration_node:
     square_size_m: 0.025
     samples_required: 25
     min_centre_distance_px: 60.0
-    output_path: /tmp/rgb_intrinsics.yaml
+    output_path: /root/.ros/camera_info/camera.yaml
 
-extrinsic_calibration_node:
+apriltag_extrinsic_latcher:
   ros__parameters:
-    color_topic: /image_raw
-    info_topic: /camera_info
-    board_cols: 9
-    board_rows: 6
-    square_size_m: 0.025
-    reference_frame: calibration_target
     camera_frame: camera
-    samples_required: 40
-    output_path: /tmp/camera_extrinsics.yaml
+    anchor_tag_frame: "tag36h11:0"
+    world_frame: world
+    samples_required: 30
+    sample_rate_hz: 5.0
+    output_path: /root/.ros/camera_info/extrinsics.yaml

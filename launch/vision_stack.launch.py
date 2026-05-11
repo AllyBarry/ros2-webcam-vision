@@ -1,64 +1,49 @@
-"""Bring up usb_cam for a UVC webcam (Logitech etc.) and the VLM detector."""
+"""Bring up v4l2_camera for a UVC webcam and the VLM detector.
+
+Uses the v4l2_camera node (not usb_cam) with `io_method=read`. The
+synchronous read() path is more tolerant of the kernel/USB quirks that
+make usb_cam's mmap+select pipeline time out on some hosts.
+"""
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 
 
-def generate_launch_description():
+def _launch_setup(context, *_args, **_kwargs):
     pkg_share = get_package_share_directory('ros2_vlm_vision')
     detector_cfg = PathJoinSubstitution([pkg_share, 'config', 'detector.yaml'])
 
-    launch_camera = DeclareLaunchArgument(
-        'launch_camera', default_value='true',
-        description='Set false if usb_cam is already running.')
-    device_arg = DeclareLaunchArgument(
-        'device', default_value='cuda:0',
-        description='Torch device for YOLOv8 (e.g. cuda:0, cpu).')
-    video_device = DeclareLaunchArgument(
-        'video_device', default_value='/dev/video0',
-        description='V4L2 device node for the webcam.')
-    image_width = DeclareLaunchArgument(
-        'image_width', default_value='1280',
-        description='Capture width (set to a mode the camera supports).')
-    image_height = DeclareLaunchArgument(
-        'image_height', default_value='720',
-        description='Capture height (set to a mode the camera supports).')
-    framerate = DeclareLaunchArgument(
-        'framerate', default_value='30.0',
-        description='Capture framerate (fps).')
-    # Default to MJPG: YUYV is uncompressed and saturates USB bandwidth at
-    # 720p (most UVC webcams cap YUYV at 10 fps for that resolution). For
-    # cameras without MJPG support, fall back to pixel_format:=yuyv2rgb
-    # image_width:=640 image_height:=480.
-    pixel_format = DeclareLaunchArgument(
-        'pixel_format', default_value='mjpeg2rgb',
-        description='usb_cam pixel format. Common values: mjpeg2rgb (modern '
-                    'UVC webcams, best at >=720p), yuyv2rgb (fallback for '
-                    'cameras without MJPG, use with 640x480). Run '
-                    '`v4l2-ctl -d /dev/video0 --list-formats-ext` to verify.')
-    camera_info_url = DeclareLaunchArgument(
-        'camera_info_url', default_value='',
-        description='file:// URL to a calibrated CameraInfo YAML. '
-                    'Leave empty for the (poor) usb_cam default.')
+    # image_size must reach ROS as an IntegerArray. LaunchConfigurations
+    # resolve to strings, so resolve and cast here at substitution time.
+    image_width = int(LaunchConfiguration('image_width').perform(context))
+    image_height = int(LaunchConfiguration('image_height').perform(context))
 
-    usb_cam_node = Node(
-        package='usb_cam',
-        executable='usb_cam_node_exe',
-        name='usb_cam',
+    # v4l2_camera will load any V4L2 control parameters from this YAML
+    # at startup (e.g. focus_absolute, auto_exposure, brightness, ...).
+    # Without it, v4l2_camera pushes its own defaults to the device,
+    # which re-enables every "auto" control. Path is the bind-mounted
+    # host-side camera_info/ directory.
+    v4l2_params_yaml = '/root/.ros/camera_info/v4l2_params.yaml'
+
+    camera_node = Node(
+        package='v4l2_camera',
+        executable='v4l2_camera_node',
+        name='v4l2_camera',
         output='screen',
-        parameters=[{
-            'video_device': LaunchConfiguration('video_device'),
-            'image_width': LaunchConfiguration('image_width'),
-            'image_height': LaunchConfiguration('image_height'),
-            'framerate': LaunchConfiguration('framerate'),
-            'pixel_format': LaunchConfiguration('pixel_format'),
-            'camera_name': 'camera',
-            'camera_info_url': LaunchConfiguration('camera_info_url'),
-            'frame_id': 'camera',
-        }],
+        parameters=[
+            v4l2_params_yaml,
+            {
+                'video_device': LaunchConfiguration('video_device'),
+                'image_size': [image_width, image_height],
+                'pixel_format': LaunchConfiguration('pixel_format'),
+                'io_method': LaunchConfiguration('io_method'),
+                'camera_info_url': LaunchConfiguration('camera_info_url'),
+                'camera_frame_id': 'camera',
+            },
+        ],
         remappings=[
             ('image_raw', '/image_raw'),
             ('camera_info', '/camera_info'),
@@ -74,15 +59,46 @@ def generate_launch_description():
         parameters=[detector_cfg, {'device': LaunchConfiguration('device')}],
     )
 
+    return [camera_node, detector_node]
+
+
+def generate_launch_description():
     return LaunchDescription([
-        launch_camera,
-        device_arg,
-        video_device,
-        image_width,
-        image_height,
-        framerate,
-        pixel_format,
-        camera_info_url,
-        usb_cam_node,
-        detector_node,
+        DeclareLaunchArgument(
+            'launch_camera', default_value='true',
+            description='Set false if v4l2_camera is already running.'),
+        DeclareLaunchArgument(
+            'device', default_value='cuda:0',
+            description='Torch device for YOLOv8 (e.g. cuda:0, cpu).'),
+        DeclareLaunchArgument(
+            'video_device', default_value='/dev/video0',
+            description='V4L2 capture node. Multi-stream webcams (e.g. Logitech '
+                        'Brio) expose several nodes; use `v4l2-ctl --list-devices` '
+                        'to identify the capture one (typically the first '
+                        'listed under the camera name).'),
+        DeclareLaunchArgument(
+            'image_width', default_value='1280',
+            description='Capture width (set to a mode the camera supports).'),
+        DeclareLaunchArgument(
+            'image_height', default_value='720',
+            description='Capture height (set to a mode the camera supports).'),
+        DeclareLaunchArgument(
+            'pixel_format', default_value='MJPG',
+            description='V4L2 fourcc. MJPG is the right default at 720p+: '
+                        'uncompressed YUYV at high res saturates USB '
+                        'bandwidth (the Brio caps YUYV @ 1280x720 at 10 fps) '
+                        'and streams freeze under WSL2/usbipd. Fall back to '
+                        'YUYV @ 640x480 for cameras without MJPG.'),
+        DeclareLaunchArgument(
+            'io_method', default_value='read',
+            description='V4L2 I/O method: read | mmap | userptr. read is the '
+                        'most compatible across kernels/USB transports.'),
+        DeclareLaunchArgument(
+            'camera_info_url',
+            default_value='file:///root/.ros/camera_info/camera.yaml',
+            description='Calibrated CameraInfo YAML. Defaults to the '
+                        'host-mounted camera_info/ volume; produced by the '
+                        'intrinsic calibration service. v4l2_camera warns '
+                        'and falls back to zero intrinsics if absent.'),
+        OpaqueFunction(function=_launch_setup),
     ])

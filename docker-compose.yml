@@ -2,65 +2,128 @@
 #   1. Docker Desktop with the WSL2 backend.
 #   2. usbipd-win (https://github.com/dorssel/usbipd-win). From an
 #      *admin* PowerShell:
-#          usbipd list                            # find Logitech (VID 046d)
+#          usbipd list                            # find the webcam VID
 #          usbipd bind   --busid <BUSID>          # once per device
-#          usbipd attach --wsl  --busid <BUSID>   # every boot
-#      The webcam appears in WSL as /dev/video0 (UVC class). Verify with
-#      `lsusb` and `v4l2-ctl --list-devices` inside WSL --- the WSL2
-#      kernel needs uvcvideo (built in to kernels >= 5.15.90.1).
+#          usbipd attach --wsl  --busid <BUSID>   # every Windows boot
+#      The webcam appears in WSL as one or more /dev/videoN nodes.
+#      Use `v4l2-ctl --list-devices` inside WSL to confirm which node
+#      is the capture interface; override CAMERA_DEVICE / video_device
+#      if it isn't /dev/video0.
 #   3. (Optional viz) Foxglove Studio on Windows --- open
 #      https://app.foxglove.dev or the desktop app and connect to
 #      ws://localhost:8765 once the `viz` profile is up.
+#   4. (Optional tune) WSL2 + WSLg (Windows 11 or up-to-date Win10)
+#      provides the X11 server the tune service plugs into. Inside
+#      WSL run `echo $DISPLAY` -- it should print something like :0.
 #
-# Note for Logitech multi-interface devices (e.g. Brio): the camera may
-# enumerate as multiple v4l2 nodes (/dev/video0 + /dev/video1 for metadata).
-# Override `video_device` in the compose command if /dev/video0 isn't the
-# capture node:
-#     command: ros2 launch ros2_vlm_vision vision_stack.launch.py
-#              device:=cpu video_device:=/dev/video2
+# Recommended order on a fresh setup:
+#   docker compose --profile build build base    # heavy, run once (~10 min)
+#   docker compose build vlm                     # fast subsequent (~30 s)
+#   docker compose run --rm tune                 # adjust focus/exposure/etc.
+#   docker compose run --rm save-settings        # persist to camera_info/
+#   docker compose --profile calibrate run --rm calibrate   # intrinsic calibration
+#   docker compose --profile viz up              # run the stack
 #
-# Usage:
-#   docker compose up --build vlm                 # detector only
-#   docker compose --profile viz up --build       # detector + foxglove bridge
+# After editing Python/launch/config: `docker compose build vlm` reuses the
+# base layer, so the rebuild is just colcon + a couple of COPYs.
+
+x-vlm-base: &vlm_base
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+  image: ros2_vlm_vision:latest
+  privileged: true
+  volumes:
+    - /dev:/dev
+    - ./camera_info:/root/.ros/camera_info
+  environment:
+    ROS_DOMAIN_ID: "0"
+    RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+    # Default capture device. Override per service (or via env) if your
+    # webcam exposes its capture interface on a different /dev/videoN.
+    CAMERA_DEVICE: /dev/video0
 
 services:
-  vlm:
+  # Heavy base image (ROS + apt + pip + YOLO weights + numpy check).
+  # Build once with `docker compose --profile build build base`. The
+  # app `vlm` service FROMs this image, so every subsequent code change
+  # only rebuilds the small colcon layer (~30 s instead of ~10 min).
+  # The container itself never runs --- this is a build-only target,
+  # hidden behind the `build` profile.
+  base:
+    profiles: ["build"]
     build:
       context: .
-      dockerfile: docker/Dockerfile
-    image: ros2_vlm_vision:latest
+      dockerfile: docker/Dockerfile.base
+    image: ros2_vlm_vision-base:latest
+    command: ["true"]
+
+
+  # Default service: applies camera_settings.txt, then runs camera +
+  # detector. The entrypoint runs apply_camera_settings.sh before
+  # v4l2_camera opens the device, so focus/exposure are locked in before
+  # the first frame is captured.
+  vlm:
+    <<: *vlm_base
     container_name: vlm_vision
-    # UVC needs the v4l2 device node passed in. /dev/bus/usb is included so
-    # usb_cam can renegotiate formats with the camera if needed.
-    devices:
-      - /dev/video0:/dev/video0
-      - /dev/bus/usb:/dev/bus/usb
-    # Some webcams enumerate extra video nodes; uncomment if your model
-    # publishes capture on /dev/video1 or beyond.
-    # group_add:
-    #   - video
-    environment:
-      ROS_DOMAIN_ID: "0"
-      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
-    networks:
-      - ros
+    networks: [ros]
     restart: unless-stopped
 
-  # Optional visualisation: Foxglove bridge exposes the detector's topics
-  # (annotated debug image and 3D markers) over WebSocket so Foxglove
-  # Studio on Windows can connect at ws://localhost:8765 without an X
-  # server.
-  foxglove:
-    image: ros2_vlm_vision:latest
-    container_name: vlm_foxglove
-    profiles: ["viz"]
-    depends_on:
-      - vlm
+  # Interactive control tuner. Opens qv4l2 with a live preview; user
+  # adjusts sliders, closes the window. WSLg / a host X server provides
+  # the display. After closing, run `docker compose run --rm save-settings`
+  # to persist the current control values to camera_info/camera_settings.txt.
+  tune:
+    <<: *vlm_base
+    profiles: ["tune"]
+    container_name: vlm_tune
     environment:
       ROS_DOMAIN_ID: "0"
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
-    networks:
-      - ros
+      CAMERA_DEVICE: /dev/video0
+      DISPLAY: ${DISPLAY:-:0}
+      QT_X11_NO_MITSHM: "1"
+    volumes:
+      - /dev:/dev
+      - ./camera_info:/root/.ros/camera_info
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /mnt/wslg:/mnt/wslg:rw              # WSL2 / WSLg path; harmless if absent
+    entrypoint: ["/entrypoint.sh"]
+    command: ["qv4l2", "-d", "/dev/video0"]
+    networks: [ros]
+    restart: "no"
+
+  # Dumps the live v4l2 control state back to camera_info/camera_settings.txt
+  # so the values picked in `tune` survive container restarts.
+  save-settings:
+    <<: *vlm_base
+    profiles: ["tune"]
+    container_name: vlm_save_settings
+    entrypoint: ["/entrypoint.sh"]
+    command: ["/usr/local/bin/save_camera_settings.sh"]
+    networks: [ros]
+    restart: "no"
+
+  # Run the intrinsic or extrinsic calibration helper. The calibrated
+  # YAML lands under ./camera_info/ on the host and is auto-loaded by
+  # v4l2_camera next time the `vlm` service starts.
+  calibrate:
+    <<: *vlm_base
+    profiles: ["calibrate"]
+    container_name: vlm_calibrate
+    networks: [ros]
+    command: >
+      ros2 launch ros2_vlm_vision calibration.launch.py mode:=intrinsic
+    restart: "no"
+
+  # Foxglove WebSocket bridge for in-browser visualisation of the
+  # detector's topics from Windows.
+  foxglove:
+    <<: *vlm_base
+    profiles: ["viz"]
+    container_name: vlm_foxglove
+    depends_on: [vlm]
+    networks: [ros]
     ports:
       - "8765:8765"
     command: >

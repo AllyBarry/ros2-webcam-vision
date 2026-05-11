@@ -1,0 +1,40 @@
+# v4l2_camera ROS parameters --- loaded at launch so they take effect
+# *before* v4l2_camera pushes its own defaults to the device. This is the
+# only reliable way to persist camera controls: setting them with
+# v4l2-ctl outside the node is overwritten on every start.
+#
+# Tune interactively with `docker compose run --rm tune` then dump the
+# active state with `docker compose run --rm save-settings` (which
+# rewrites this file). Manual edits are fine; values must use the right
+# YAML type (bool / int) -- v4l2_camera declares each control with the
+# kernel's type and rejects mismatches at startup.
+#
+# Run `v4l2-ctl -d /dev/video0 --list-ctrls` to see every control and
+# its type on your camera.
+v4l2_camera:
+  ros__parameters:
+    # --- autos off (do these first; their state is what locks
+    # the manual values below) -----------------------------------------
+    white_balance_automatic: false
+    focus_automatic_continuous: false
+    exposure_dynamic_framerate: false
+    auto_exposure: 1                # menu: 1 = Manual Mode
+    backlight_compensation: 0
+
+    # --- exposure & focus ---------------------------------------------
+    exposure_time_absolute: 350
+    focus_absolute: 0
+    gain: 15
+
+    # --- colour & response --------------------------------------------
+    white_balance_temperature: 4500
+    brightness: 128
+    contrast: 145
+    saturation: 100
+    sharpness: 180
+    power_line_frequency: 2         # menu: 2 = 50 Hz
+
+    # --- framing -------------------------------------------------------
+    pan_absolute: 0
+    tilt_absolute: 0
+    zoom_absolute: 100

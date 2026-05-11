@@ -1,0 +1,16 @@
+apriltag:
+  ros__parameters:
+    image_transport: raw
+    family: "36h11"
+    # Edge length of the black square of your printed tag, in metres.
+    # Measure carefully -- the PnP pose scales linearly with this.
+    size: 0.162
+    max_hamming: 1
+    detector:
+      threads: 2
+      decimate: 1.0
+      blur: 0.0
+      refine: true
+      sharpening: 0.25
+      debug: false
+    pose_estimation_method: "pnp"

@@ -24,6 +24,7 @@ in-browser visualisation.
 - [Quick start (Docker, Windows / WSL2)](#quick-start-docker-windows--wsl2)
 - [Native build (Ubuntu 22.04 + ROS 2 Humble)](#native-build-ubuntu-2204--ros-2-humble)
 - [Selecting target objects](#selecting-target-objects)
+- [Camera settings (focus, exposure, white balance)](#camera-settings-focus-exposure-white-balance)
 - [Calibration](#calibration)
 - [Customising the size table](#customising-the-size-table)
 - [Parameters](#parameters)
@@ -104,9 +105,25 @@ v4l2-ctl --list-devices                # should show /dev/video0 (and friends)
 **Build and run** (from the package root inside WSL):
 
 ```bash
-docker compose up --build vlm                  # detector + camera driver
+# One-time: build the heavy base image (~10 min: apt + torch + ultralytics
+# + YOLO weights). Only re-run when the dependency list in
+# docker/Dockerfile.base changes.
+docker compose --profile build build base
+
+# Subsequent: fast app rebuild (~30 s) -- just colcon + COPYs.
+docker compose build vlm
+docker compose up vlm
+
+# Or both in one go for the very first run:
+docker compose --profile build build base && docker compose up --build vlm
+
 docker compose --profile viz up --build        # adds foxglove bridge on :8765
 ```
+
+After editing Python source / launch / config, just `docker compose build vlm`
+re-uses the `ros2_vlm_vision-base:latest` image and only rebuilds the app
+layer. The `base` profile keeps the heavy image hidden from the default
+`docker compose up` so it isn't accidentally rebuilt.
 
 To visualise, open Foxglove Studio on Windows, choose **Open connection →
 Foxglove WebSocket**, and connect to `ws://localhost:8765`. Useful panels:
@@ -219,24 +236,116 @@ What gets drawn:
   target, so the class name and confidence are readable in Foxglove's 3D
   panel without hovering.
 
+## Camera settings (focus, exposure, white balance)
+
+UVC webcams ship with autofocus, auto-exposure, and auto-white-balance
+on. Those autos drift between frames and during calibration, which
+poisons intrinsics. **Lock the camera settings before calibrating** and
+before relying on detection distances.
+
+The settings live in
+[`camera_info/v4l2_params.yaml`](camera_info/v4l2_params.yaml) as a ROS
+parameter file (`v4l2_camera: ros__parameters: {...}`). The launch
+passes this file to `v4l2_camera` so the controls are set through the
+node's own parameter system. Setting controls externally with
+`v4l2-ctl` doesn't work --- `v4l2_camera` declares a ROS parameter for
+every V4L2 control and pushes the parameter's default to the device at
+startup, overwriting any pre-set value.
+
+Types matter: boolean controls (e.g. `white_balance_automatic`) must be
+`true`/`false`, integer / menu controls must be integers. Run
+`docker compose exec vlm v4l2-ctl -d /dev/video0 --list-ctrls` to see
+each control's type on your camera.
+
+**Tune interactively (qv4l2).** WSL2/WSLg provides the X server, so
+GUI apps in the container work without setup:
+
+```bash
+docker compose run --rm tune        # opens qv4l2 with live preview
+```
+
+In qv4l2:
+
+1. **Controls** tab → disable every "auto" first (autofocus,
+   auto-exposure, auto-white-balance).
+2. Move sliders until the preview looks right. For YOLO inference,
+   reasonable starting points: exposure short enough to freeze motion,
+   focus dialled in on objects at your typical operating distance,
+   white balance fixed.
+3. Close the window when satisfied.
+
+**Persist the chosen values.** qv4l2 doesn't save anywhere by itself;
+dump the camera's current state to the ROS parameter YAML:
+
+```bash
+docker compose run --rm save-settings
+```
+
+The file at `camera_info/v4l2_params.yaml` is rewritten with every
+typed control. Manual edits to that file work too --- just keep the
+type discipline (booleans as `true`/`false`, ints as ints).
+
+**Apply outside the GUI.** The next `docker compose up vlm` (or
+`docker compose restart vlm`) reapplies the file. To change a single
+control at runtime without restarting:
+
+```bash
+docker compose exec vlm bash -c \
+    'source /opt/ros/humble/setup.bash && \
+     ros2 param set /v4l2_camera exposure_time_absolute 200'
+```
+
+`v4l2_camera` propagates the new parameter to the device immediately
+(this is the supported path; `v4l2-ctl -c` is overwritten on the next
+parameter sync).
+
 ## Calibration
 
 UVC webcams ship without usable factory intrinsics; **run the intrinsic
 calibration before relying on the 3D output** — the heuristic's accuracy
-depends on a correct `fy`.
+depends on a correct `fy`. Calibration must happen *after* you've locked
+the camera settings (focus especially — calibrating with autofocus on
+produces garbage intrinsics).
 
 Print a chessboard (defaults: 9×6 inner corners, 25 mm squares) and adjust
 `board_cols`, `board_rows`, `square_size_m` in
 [config/calibration.yaml](config/calibration.yaml) if yours differs.
 
 ```bash
-# Intrinsics — collects diverse views, writes /tmp/rgb_intrinsics.yaml + RMS.
+# Intrinsics — collects diverse views and writes camera_info/camera.yaml
+# (auto-loaded by v4l2_camera on next start).
 ros2 launch ros2_vlm_vision calibration.launch.py mode:=intrinsic
 
-# Extrinsic (camera frame -> chessboard frame) — averages N PnP solves,
-# writes /tmp/camera_extrinsics.yaml and publishes a static TF.
+# Extrinsic — rectify -> apriltag_ros -> apriltag_extrinsic_latcher.
+# Tape an AprilTag where you want the world origin to be, run the
+# command, the latcher collects N stable detections of the anchor tag,
+# inverts cam->tag to get world->camera, writes
+# camera_info/extrinsics.yaml, and broadcasts a static TF.
 ros2 launch ros2_vlm_vision calibration.launch.py mode:=extrinsic
 ```
+
+**Anchor tag setup.** The default anchor is `tag36h11:0`. Print an
+AprilTag from the 36h11 family (the Wiki has PDFs:
+<https://github.com/AprilRobotics/apriltag-imgs>), measure its black
+square edge length precisely, and set `apriltag.size` in
+[config/apriltag.yaml](config/apriltag.yaml) to that value in metres
+(default `0.162`). The position you tape the tag at *is* the world
+origin; the tag plane is the world X-Y, with +Z out of the tag.
+
+Override the anchor tag ID via the launch arg if you'd rather use a
+different one (e.g. `apriltag_extrinsic_latcher:anchor_tag_frame:=tag36h11:5`).
+
+**What gets published.** Once the latcher finalises:
+
+- Static TF: `world -> camera` (the camera's pose in the world frame).
+- YAML at `camera_info/extrinsics.yaml` with both `world_T_camera` and
+  `camera_T_world` for callers that need either direction without
+  re-inverting.
+
+`vlm_detector_node` publishes its detections in `frame_id=camera`. With
+the static TF in place, any tf2 listener (or Foxglove's 3D panel set to
+`world` as the display frame) sees the detections in world coordinates
+automatically.
 
 To plumb the calibrated intrinsics back into `usb_cam`, point its
 `camera_info_url` at the YAML you produced:
@@ -246,12 +355,22 @@ ros2 launch ros2_vlm_vision vision_stack.launch.py \
     camera_info_url:=file:///tmp/rgb_intrinsics.yaml
 ```
 
-Run them through Docker by overriding the service command, e.g.
+Run them through the dedicated compose service (it shares the same
+`camera_info/` volume, so the produced YAML lands next to your settings
+file and is auto-loaded by the `vlm` service on its next start):
 
 ```bash
-docker compose run --rm vlm \
-    ros2 launch ros2_vlm_vision calibration.launch.py mode:=intrinsic
+docker compose --profile calibrate run --rm calibrate                      # intrinsic by default
+docker compose --profile calibrate run --rm calibrate \
+    ros2 launch ros2_vlm_vision calibration.launch.py mode:=extrinsic      # override for extrinsic
 ```
+
+Recommended order on a fresh setup:
+
+1. `docker compose run --rm tune` — adjust focus / exposure / white balance.
+2. `docker compose run --rm save-settings` — persist to `camera_info/camera_settings.txt`.
+3. `docker compose --profile calibrate run --rm calibrate` — produce intrinsics.
+4. `docker compose --profile viz up` — run the stack with both applied.
 
 ## Customising the size table
 

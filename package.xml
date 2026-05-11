@@ -18,7 +18,9 @@
   <depend>cv_bridge</depend>
   <depend>image_transport</depend>
 
-  <exec_depend>usb_cam</exec_depend>
+  <exec_depend>v4l2_camera</exec_depend>
+  <exec_depend>apriltag_ros</exec_depend>
+  <exec_depend>image_proc</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

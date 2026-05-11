@@ -31,7 +31,7 @@ setup(
         'console_scripts': [
             'vlm_detector_node = ros2_vlm_vision.vlm_detector_node:main',
             'intrinsic_calibration_node = ros2_vlm_vision.calibration.intrinsic_calibration_node:main',
-            'extrinsic_calibration_node = ros2_vlm_vision.calibration.extrinsic_calibration_node:main',
+            'apriltag_extrinsic_latcher = ros2_vlm_vision.calibration.apriltag_extrinsic_latcher:main',
         ],
     },
 )
