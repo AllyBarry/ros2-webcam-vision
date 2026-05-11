@@ -1,0 +1,76 @@
+# Windows / WSL2 prerequisites:
+#   1. Docker Desktop with the WSL2 backend.
+#   2. usbipd-win (https://github.com/dorssel/usbipd-win). From an
+#      *admin* PowerShell:
+#          usbipd list                            # find Logitech (VID 046d)
+#          usbipd bind   --busid <BUSID>          # once per device
+#          usbipd attach --wsl  --busid <BUSID>   # every boot
+#      The webcam appears in WSL as /dev/video0 (UVC class). Verify with
+#      `lsusb` and `v4l2-ctl --list-devices` inside WSL --- the WSL2
+#      kernel needs uvcvideo (built in to kernels >= 5.15.90.1).
+#   3. (Optional viz) Foxglove Studio on Windows --- open
+#      https://app.foxglove.dev or the desktop app and connect to
+#      ws://localhost:8765 once the `viz` profile is up.
+#
+# Note for Logitech multi-interface devices (e.g. Brio): the camera may
+# enumerate as multiple v4l2 nodes (/dev/video0 + /dev/video1 for metadata).
+# Override `video_device` in the compose command if /dev/video0 isn't the
+# capture node:
+#     command: ros2 launch ros2_vlm_vision vision_stack.launch.py
+#              device:=cpu video_device:=/dev/video2
+#
+# Usage:
+#   docker compose up --build vlm                 # detector only
+#   docker compose --profile viz up --build       # detector + foxglove bridge
+
+services:
+  vlm:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: ros2_vlm_vision:latest
+    container_name: vlm_vision
+    # UVC needs the v4l2 device node passed in. /dev/bus/usb is included so
+    # usb_cam can renegotiate formats with the camera if needed.
+    devices:
+      - /dev/video0:/dev/video0
+      - /dev/bus/usb:/dev/bus/usb
+    # Some webcams enumerate extra video nodes; uncomment if your model
+    # publishes capture on /dev/video1 or beyond.
+    # group_add:
+    #   - video
+    environment:
+      ROS_DOMAIN_ID: "0"
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+    networks:
+      - ros
+    restart: unless-stopped
+
+  # Optional visualisation: Foxglove bridge exposes the detector's topics
+  # (annotated debug image and 3D markers) over WebSocket so Foxglove
+  # Studio on Windows can connect at ws://localhost:8765 without an X
+  # server.
+  foxglove:
+    image: ros2_vlm_vision:latest
+    container_name: vlm_foxglove
+    profiles: ["viz"]
+    depends_on:
+      - vlm
+    environment:
+      ROS_DOMAIN_ID: "0"
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+    networks:
+      - ros
+    ports:
+      - "8765:8765"
+    command: >
+      ros2 run foxglove_bridge foxglove_bridge
+      --ros-args
+      -p port:=8765
+      -p address:=0.0.0.0
+      -p send_buffer_limit:=10000000
+    restart: unless-stopped
+
+networks:
+  ros:
+    driver: bridge

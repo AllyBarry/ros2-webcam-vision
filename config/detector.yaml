@@ -1,0 +1,15 @@
+vlm_detector_node:
+  ros__parameters:
+    model: yolov8n.pt
+    device: cuda:0
+    conf_threshold: 0.35
+    iou_threshold: 0.45
+    max_distance: 25.0
+    image_topic: /image_raw
+    info_topic: /camera_info
+    camera_frame: camera
+    # Comma-separated initial filter; empty = show every class.
+    # Override live by publishing to ~/target_classes (std_msgs/String).
+    initial_target_classes: ""
+    # Draw non-target detections faded in the debug image (false = hide).
+    show_non_targets: true

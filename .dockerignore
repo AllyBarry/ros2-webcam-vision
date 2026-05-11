@@ -1,0 +1,12 @@
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+**/build
+**/install
+**/log
+.git
+.gitignore
+.venv
+.vscode
+.idea
