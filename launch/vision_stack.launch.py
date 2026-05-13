@@ -130,18 +130,19 @@ def generate_launch_description():
                         'in /dev/v4l/by-id/ when video_device=auto. Use an '
                         'empty string to accept any UVC capture device.'),
         DeclareLaunchArgument(
-            'image_width', default_value='1280',
+            'image_width', default_value='640',
             description='Capture width (set to a mode the camera supports).'),
         DeclareLaunchArgument(
-            'image_height', default_value='720',
+            'image_height', default_value='480',
             description='Capture height (set to a mode the camera supports).'),
         DeclareLaunchArgument(
-            'pixel_format', default_value='MJPG',
-            description='V4L2 fourcc. MJPG is the right default at 720p+: '
-                        'uncompressed YUYV at high res saturates USB '
-                        'bandwidth (the Brio caps YUYV @ 1280x720 at 10 fps) '
-                        'and streams freeze under WSL2/usbipd. Fall back to '
-                        'YUYV @ 640x480 for cameras without MJPG.'),
+            'pixel_format', default_value='YUYV',
+            description='V4L2 fourcc. YUYV is the safe default: the '
+                        'apt-shipped ros-humble-v4l2-camera lacks MJPG '
+                        'decode and aborts on the conversion path. YUYV '
+                        '@ 640x480 fits USB bandwidth comfortably. Override '
+                        'to MJPG only if you replace v4l2_camera with a '
+                        'build that decodes MJPG.'),
         DeclareLaunchArgument(
             'io_method', default_value='read',
             description='V4L2 I/O method: read | mmap | userptr. read is the '
