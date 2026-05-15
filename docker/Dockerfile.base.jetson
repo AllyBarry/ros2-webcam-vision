@@ -88,11 +88,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # /opt/ros_overlay to keep it cleanly separate from /ros_ws (the app
 # workspace) so re-COPY-ing the app source doesn't invalidate this
 # heavy layer.
+#
+# apriltag_ros is pinned to a tag rather than tracking master because
+# master pulls in `camera_ros` as a transitive dep, which itself depends
+# on cv_bridge -> libopencv-*-dev and re-triggers the dpkg overwrite
+# conflict against dustynv's OpenCV. 3.2.1 predates that dependency.
 WORKDIR /opt/ros_overlay/src
 RUN git clone --depth=1 -b humble https://github.com/ros-perception/vision_opencv.git \
  && git clone --depth=1 -b humble https://github.com/ros-perception/image_pipeline.git \
  && git clone --depth=1 -b humble https://gitlab.com/boldhearts/ros2_v4l2_camera.git \
- && git clone --depth=1                https://github.com/christianrauch/apriltag_ros.git
+ && git clone --depth=1 -b 3.2.1   https://github.com/christianrauch/apriltag_ros.git
 
 # rosdep system deps for the source workspace, with --skip-keys naming
 # every libopencv-* package so rosdep doesn't try to apt-install Jammy's
@@ -108,7 +113,8 @@ RUN apt-get update \
             libopencv-flann-dev libopencv-dnn-dev libopencv-objdetect-dev \
             libopencv-photo-dev libopencv-video-dev libopencv-shape-dev \
             libopencv-stitching-dev libopencv-superres-dev libopencv-videostab-dev \
-            libopencv-contrib-dev python3-opencv" \
+            libopencv-contrib-dev python3-opencv \
+            camera_ros libcamera" \
  && rm -rf /var/lib/apt/lists/*
 
 # colcon-build against dustynv's OpenCV. cmake's find_package(OpenCV)
