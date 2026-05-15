@@ -35,7 +35,7 @@
 #     and pull torch from the Jetson AI Lab mirror:
 #       BASE_IMAGE=dustynv/ros:humble-ros-base-l4t-r36.3.0  (default)
 #       BASE_IMAGE=dustynv/ros:humble-ros-base-l4t-r36.2.0  (JP 6.0)
-#       PYPI_INDEX_URL=https://pypi.jetson-ai-lab.dev/jp6/cu126
+#       PYPI_INDEX_URL=https://pypi.jetson-ai-lab.io/jp6/cu126
 # ----------------------------------------------------------------------
 
 ARG BASE_IMAGE=dustynv/ros:humble-ros-base-l4t-r36.3.0

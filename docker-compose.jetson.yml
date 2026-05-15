@@ -23,7 +23,7 @@
 #   OpenCV in /usr/ that collides with apt's libopencv-*-dev (dpkg
 #   "trying to overwrite"):
 #     export BASE_IMAGE=dustynv/ros:humble-ros-base-l4t-r36.3.0
-#     export PYPI_INDEX_URL=https://pypi.jetson-ai-lab.dev/jp6/cu126
+#     export PYPI_INDEX_URL=https://pypi.jetson-ai-lab.io/jp6/cu126
 #
 #   JetPack 5.1.x (L4T r35.*) -- combined image already has torch, leave
 #   PYPI_INDEX_URL empty:
@@ -96,7 +96,7 @@ services:
       dockerfile: docker/Dockerfile.base.jetson
       args:
         BASE_IMAGE: ${BASE_IMAGE:-dustynv/ros:humble-ros-base-l4t-r36.3.0}
-        PYPI_INDEX_URL: ${PYPI_INDEX_URL:-https://pypi.jetson-ai-lab.dev/jp6/cu126}
+        PYPI_INDEX_URL: ${PYPI_INDEX_URL:-https://pypi.jetson-ai-lab.io/jp6/cu126}
         # apriltag_ros has been brittle to build on L4T. Default off;
         # set BUILD_APRILTAG_ROS=1 to attempt it (extrinsic calibration
         # only).
