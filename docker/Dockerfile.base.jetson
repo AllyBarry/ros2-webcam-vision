@@ -30,12 +30,18 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    # dustynv r36.* images set PIP_INDEX_URL + PIP_TRUSTED_HOST to a
+    # dustynv r36.* images set PIP_INDEX_URL/PIP_TRUSTED_HOST to a
     # webredirect.org host that no longer resolves. ENV-var settings
-    # take precedence over any pip.conf, so they have to be cleared
-    # here -- rm /etc/pip.conf alone isn't enough.
-    PIP_INDEX_URL= \
-    PIP_TRUSTED_HOST=
+    # take precedence over any pip.conf, so we have to clear them
+    # explicitly -- rm /etc/pip.conf alone isn't enough.
+    #
+    # Empty string is NOT the same as unset for pip: an empty
+    # PIP_INDEX_URL leaves pip in a broken state where wheel-fetch
+    # URLs come out without a scheme/host and connect attempts fail
+    # with "Network is unreachable". Point it at the real PyPI index;
+    # Step 3 overrides with --index-url for the Jetson mirror.
+    PIP_INDEX_URL=https://pypi.org/simple \
+    PIP_TRUSTED_HOST=pypi.org
 
 # ----------------------------------------------------------------------
 # Step 1: refresh expired ROS apt key  [STATUS: works]
