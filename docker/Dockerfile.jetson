@@ -1,0 +1,34 @@
+# ros2_vlm_vision app image (Jetson / aarch64)
+# FROMs the prebuilt Jetson base; only the package source + colcon build
+# live here. Mirrors docker/Dockerfile (the desktop/CPU variant) so that
+# rebuild semantics are identical: editing only entrypoint.sh or a script
+# does not re-run colcon.
+#
+# Build order:
+#   docker compose -f docker-compose.jetson.yml --profile build build base
+#   docker compose -f docker-compose.jetson.yml build vlm
+ARG BASE_IMAGE=ros2_vlm_vision-base-jetson:latest
+FROM ${BASE_IMAGE}
+
+# ---- ROS package: source + manifest, then colcon build -----------------
+WORKDIR /ros_ws/src/ros2_vlm_vision
+COPY package.xml setup.py setup.cfg ./
+COPY resource     ./resource
+COPY ros2_vlm_vision ./ros2_vlm_vision
+COPY launch       ./launch
+COPY config       ./config
+
+WORKDIR /ros_ws
+RUN . /opt/ros/humble/setup.sh \
+ && colcon build --packages-select ros2_vlm_vision --symlink-install
+
+# ---- Helper scripts + entrypoint (frequent edits) ---------------------
+COPY docker/entrypoint.sh /entrypoint.sh
+COPY scripts/save_camera_settings.sh  /usr/local/bin/save_camera_settings.sh
+RUN chmod +x /entrypoint.sh \
+        /usr/local/bin/save_camera_settings.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+# Default to GPU on Jetson -- override per-service in docker-compose.jetson.yml
+# if you need CPU inference for comparison.
+CMD ["ros2", "launch", "ros2_vlm_vision", "vision_stack.launch.py", "device:=cuda:0"]

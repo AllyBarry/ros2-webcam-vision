@@ -1,0 +1,147 @@
+# Jetson (aarch64) variant of docker-compose.yml.
+#
+# Host prerequisites:
+#   1. NVIDIA Jetson with JetPack 5.x or 6.x flashed (gives you CUDA,
+#      cuDNN, TensorRT and the nvidia container runtime).
+#   2. Docker configured with the nvidia runtime as default OR
+#      `--runtime nvidia` / the per-service `runtime: nvidia` below.
+#      Verify with: `docker info | grep -i runtime`.
+#   3. A UVC webcam plugged into the Jetson (CSI cameras need a different
+#      capture stack -- this compose targets v4l2 USB cameras like the
+#      Logitech BRIO/C920/C270).
+#
+# Pick the L4T tag for your JetPack at base-image build time:
+#       docker compose -f docker-compose.jetson.yml --profile build \
+#               build base --build-arg L4T_TAG=r36.4.0
+#   JetPack 6.x  -> r36.2.0 / r36.3.0 / r36.4.0  (default)
+#   JetPack 5.1.x -> r35.4.1
+#
+# Recommended order on a fresh setup:
+#   docker compose -f docker-compose.jetson.yml --profile build build base   # ~20-30 min on Orin Nano
+#   docker compose -f docker-compose.jetson.yml build vlm                    # fast subsequent (~30 s)
+#   docker compose -f docker-compose.jetson.yml run --rm tune                # adjust focus/exposure
+#   docker compose -f docker-compose.jetson.yml run --rm save-settings
+#   docker compose -f docker-compose.jetson.yml --profile calibrate run --rm calibrate
+#   docker compose -f docker-compose.jetson.yml --profile viz up
+#
+# Sanity-check GPU access from inside the container:
+#   docker compose -f docker-compose.jetson.yml run --rm --entrypoint python3 vlm \
+#       -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+
+x-vlm-base: &vlm_base
+  build:
+    context: .
+    dockerfile: docker/Dockerfile.jetson
+  image: ros2_vlm_vision-jetson:latest
+  runtime: nvidia
+  privileged: true
+  volumes:
+    - /dev:/dev
+    - ./camera_info:/root/.ros/camera_info
+  environment:
+    ROS_DOMAIN_ID: "0"
+    RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+    # Default capture device. Override per service (or via env) if your
+    # webcam exposes its capture interface on a different /dev/videoN.
+    CAMERA_DEVICE: /dev/video0
+    # Make all visible GPUs available; on Jetson this is the integrated
+    # iGPU, but the env var is what the nvidia runtime keys off.
+    NVIDIA_VISIBLE_DEVICES: all
+    NVIDIA_DRIVER_CAPABILITIES: all
+
+services:
+  # Heavy base image (ROS + apt + ultralytics + YOLO weights + numpy check).
+  # The L4T base already provides CUDA / cuDNN / TensorRT / torch.
+  # Build once with:
+  #   docker compose -f docker-compose.jetson.yml --profile build build base
+  # Override L4T tag with --build-arg L4T_TAG=r35.4.1 etc.
+  base:
+    profiles: ["build"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.base.jetson
+      args:
+        L4T_TAG: ${L4T_TAG:-r36.4.0}
+    image: ros2_vlm_vision-base-jetson:latest
+    command: ["true"]
+
+  # Default service: camera + detector on GPU (device:=cuda:0 set in the
+  # Dockerfile's CMD).
+  vlm:
+    <<: *vlm_base
+    container_name: vlm_vision
+    networks: [ros]
+    restart: unless-stopped
+
+  # Interactive control tuner. Opens qv4l2 with a live preview using the
+  # host's X server (Jetson runs a desktop session on tty1 by default).
+  # If you're on a headless Jetson, SSH with `-X` and DISPLAY/Xauthority
+  # will be forwarded; the bind-mounts below still apply.
+  tune:
+    <<: *vlm_base
+    profiles: ["tune"]
+    container_name: vlm_tune
+    environment:
+      ROS_DOMAIN_ID: "0"
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      CAMERA_DEVICE: /dev/video0
+      DISPLAY: ${DISPLAY:-:0}
+      XAUTHORITY: ${XAUTHORITY:-/root/.Xauthority}
+      QT_X11_NO_MITSHM: "1"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+    volumes:
+      - /dev:/dev
+      - ./camera_info:/root/.ros/camera_info
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ${XAUTHORITY:-/dev/null}:/root/.Xauthority:ro
+    entrypoint: ["/entrypoint.sh"]
+    command: ["qv4l2", "-d", "/dev/video0"]
+    networks: [ros]
+    restart: "no"
+
+  # Dumps the live v4l2 control state back to camera_info/v4l2_params.yaml
+  # so the values picked in `tune` survive container restarts.
+  save-settings:
+    <<: *vlm_base
+    profiles: ["tune"]
+    container_name: vlm_save_settings
+    entrypoint: ["/entrypoint.sh"]
+    command: ["/usr/local/bin/save_camera_settings.sh"]
+    networks: [ros]
+    restart: "no"
+
+  # Intrinsic / extrinsic calibration. Lands camera.yaml + extrinsics.yaml
+  # under ./camera_info/ on the host so the `vlm` service auto-loads them
+  # on its next start.
+  calibrate:
+    <<: *vlm_base
+    profiles: ["calibrate"]
+    container_name: vlm_calibrate
+    networks: [ros]
+    command: >
+      ros2 launch ros2_vlm_vision calibration.launch.py mode:=intrinsic
+    restart: "no"
+
+  # Foxglove WebSocket bridge for in-browser visualisation. Bind to the
+  # Jetson's LAN IP (or use SSH tunnel) -- the port is published on the
+  # default bridge network.
+  foxglove:
+    <<: *vlm_base
+    profiles: ["viz"]
+    container_name: vlm_foxglove
+    depends_on: [vlm]
+    networks: [ros]
+    ports:
+      - "8765:8765"
+    command: >
+      ros2 run foxglove_bridge foxglove_bridge
+      --ros-args
+      -p port:=8765
+      -p address:=0.0.0.0
+      -p send_buffer_limit:=10000000
+    restart: unless-stopped
+
+networks:
+  ros:
+    driver: bridge

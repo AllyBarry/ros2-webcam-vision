@@ -1,0 +1,72 @@
+# ros2_vlm_vision-base (Jetson / aarch64)
+# Heavy, rarely-changing layer for NVIDIA Jetson (Orin Nano / NX / AGX, Xavier).
+# Built once with
+#
+#   docker compose -f docker-compose.jetson.yml --profile build build base
+#
+# Starts from dusty-nv's prebuilt ROS Humble + PyTorch image for L4T,
+# which already ships:
+#   - CUDA / cuDNN / TensorRT matched to the L4T tag
+#   - PyTorch + torchvision built against that CUDA (do NOT pip reinstall
+#     these from PyPI -- the upstream aarch64 wheels are CPU-only and will
+#     silently break GPU inference)
+#   - OpenCV (often with CUDA)
+#   - ROS Humble desktop-ish stack
+#
+# Pick the L4T tag matching your JetPack:
+#   JetPack 6.x  -> r36.2.0 / r36.3.0 / r36.4.0
+#   JetPack 5.1.x -> r35.4.1
+# Override at build time:
+#   docker compose -f docker-compose.jetson.yml --profile build build base \
+#       --build-arg L4T_TAG=r36.4.0
+ARG L4T_TAG=r36.4.0
+FROM dustynv/ros:humble-pytorch-l4t-${L4T_TAG}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+# Most of these are present in dustynv's image already; install is
+# idempotent and a no-op when satisfied. apriltag_ros and foxglove_bridge
+# are the two most commonly missing from the slimmer L4T variants.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3-pip \
+        python3-colcon-common-extensions \
+        ros-humble-v4l2-camera \
+        ros-humble-vision-msgs \
+        ros-humble-cv-bridge \
+        ros-humble-image-transport \
+        ros-humble-image-common \
+        ros-humble-image-proc \
+        ros-humble-apriltag-ros \
+        ros-humble-camera-info-manager \
+        ros-humble-tf2-ros \
+        ros-humble-tf2-geometry-msgs \
+        ros-humble-foxglove-bridge \
+        qv4l2 \
+        v4l-utils \
+        usbutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Ultralytics on Jetson: install WITHOUT pulling torch/torchvision from
+# PyPI, since the L4T base already provides CUDA-enabled wheels and the
+# upstream aarch64 wheels are CPU-only.
+#
+# numpy is held to <2 to keep the apt-shipped ros-humble-cv-bridge boost
+# extension loadable (it's built against the NumPy 1.x C ABI).
+ARG PIP_OPTS="--retries 10 --timeout 120"
+RUN pip3 install $PIP_OPTS --no-deps ultralytics \
+ && pip3 install $PIP_OPTS \
+        'numpy<2' \
+        'opencv-python>=4.6,<4.13' \
+        pyyaml requests tqdm psutil py-cpuinfo matplotlib pandas seaborn \
+ && python3 -c "import torch; print(f'torch {torch.__version__} installed (CUDA check deferred to runtime)')" \
+ && python3 -c "import numpy, sys; v = numpy.__version__; \
+        sys.exit(0 if v.startswith('1.') else \
+                 (print(f'numpy {v} leaked into the image', file=sys.stderr) or 1))"
+
+# Pre-fetch the default YOLOv8 weights so first run is offline-safe.
+WORKDIR /ros_ws
+RUN python3 -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
+ENV YOLO_CONFIG_DIR=/ros_ws
