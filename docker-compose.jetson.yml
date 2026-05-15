@@ -30,10 +30,17 @@
 #     export BASE_IMAGE=dustynv/ros:humble-pytorch-l4t-r35.4.1
 #     export PYPI_INDEX_URL=
 #
+# GUI services (`tune`) need the host X server. On Jetson, grant the
+# container access from the host shell once per login session:
+#   xhost +local:docker
+# (the WSL `tune` service doesn't need this -- WSLg accepts containerised
+# clients by default. This is a Jetson-only step.)
+#
 # Recommended order on a fresh setup:
+#   xhost +local:docker                                                       # host: allow X clients
 #   docker compose -f docker-compose.jetson.yml --profile build build base   # ~20-30 min on Orin Nano
 #   docker compose -f docker-compose.jetson.yml build vlm                    # fast subsequent (~30 s)
-#   docker compose -f docker-compose.jetson.yml run --rm tune                # adjust focus/exposure
+#   docker compose -f docker-compose.jetson.yml --profile tune run --rm tune  # adjust focus/exposure
 #   docker compose -f docker-compose.jetson.yml run --rm save-settings
 #   docker compose -f docker-compose.jetson.yml --profile calibrate run --rm calibrate
 #   docker compose -f docker-compose.jetson.yml --profile viz up
@@ -91,19 +98,30 @@ services:
     restart: unless-stopped
 
   # Interactive control tuner. Opens qv4l2 with a live preview using the
-  # host's X server (Jetson runs a desktop session on tty1 by default).
-  # If you're on a headless Jetson, SSH with `-X` and DISPLAY/Xauthority
-  # will be forwarded; the bind-mounts below still apply.
+  # host's X server.
+  #
+  # Before running on a Jetson, grant the container access to the X
+  # display from the host shell:
+  #     xhost +local:docker        # one-time per login session
+  # Then run:
+  #     docker compose -f docker-compose.jetson.yml --profile tune run --rm tune
+  #
+  # Uses network_mode: host for X (loopback) + DDS sharing with native
+  # ROS processes. The XAUTHORITY bind-mount dance the WSL variant uses
+  # is unnecessary here -- `xhost +local:docker` plus mounting the X
+  # socket is all qv4l2 needs, and avoids the previous compose's
+  # ${XAUTHORITY:-/dev/null}:/root/.Xauthority:ro fallback (which fails
+  # to bind-mount /dev/null on SSH sessions where XAUTHORITY is unset).
   tune:
     <<: *vlm_base
     profiles: ["tune"]
     container_name: vlm_tune
+    network_mode: host
     environment:
       ROS_DOMAIN_ID: "0"
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       CAMERA_DEVICE: /dev/video0
       DISPLAY: ${DISPLAY:-:0}
-      XAUTHORITY: ${XAUTHORITY:-/root/.Xauthority}
       QT_X11_NO_MITSHM: "1"
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: all
@@ -111,10 +129,8 @@ services:
       - /dev:/dev
       - ./camera_info:/root/.ros/camera_info
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
-      - ${XAUTHORITY:-/dev/null}:/root/.Xauthority:ro
     entrypoint: ["/entrypoint.sh"]
     command: ["qv4l2", "-d", "/dev/video0"]
-    networks: [ros]
     restart: "no"
 
   # Dumps the live v4l2 control state back to camera_info/v4l2_params.yaml
