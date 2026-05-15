@@ -22,11 +22,15 @@
 #
 #   JetPack 6.x (L4T r36.*): NO combined image exists, so use a plain
 #     ROS image and install CUDA-enabled torch via Jetson AI Lab's PyPI
-#     mirror:
-#       BASE_IMAGE=dustynv/ros:humble-desktop-l4t-r36.4.0   (JP 6.1 / 6.2)
-#       BASE_IMAGE=dustynv/ros:humble-desktop-l4t-r36.2.0   (JP 6.0)
-#       BASE_IMAGE=dustynv/ros:humble-ros-base-l4t-r36.3.0  (lighter)
+#     mirror. Use the *ros-base* variant -- the desktop variant ships
+#     with a pre-installed OpenCV under /usr/ that collides with the
+#     libopencv-*-dev packages apt pulls in for cv_bridge:
+#       BASE_IMAGE=dustynv/ros:humble-ros-base-l4t-r36.3.0  (default)
+#       BASE_IMAGE=dustynv/ros:humble-ros-base-l4t-r36.2.0  (JP 6.0)
 #       PYPI_INDEX_URL=https://pypi.jetson-ai-lab.dev/jp6/cu126
+#     If you must use a desktop variant (or hit the same OpenCV dpkg
+#     conflict on another base), the workaround is to source-build
+#     vision_opencv against dustynv's OpenCV; see README.
 #
 # Build with overrides via docker-compose.jetson.yml's build.args, or:
 #   docker build \
@@ -35,7 +39,12 @@
 #       -f docker/Dockerfile.base.jetson -t ros2_vlm_vision-base-jetson:latest .
 # ----------------------------------------------------------------------
 
-ARG BASE_IMAGE=dustynv/ros:humble-desktop-l4t-r36.4.0
+# Defaulting to the *ros-base* (not desktop) variant: the desktop image
+# pre-installs OpenCV into /usr/, which collides with apt's libopencv-*-dev
+# pulled in by ros-humble-cv-bridge & friends (dpkg "trying to overwrite").
+# The ros-base variant ships without OpenCV pre-installed so apt can place
+# the Jammy libopencv-* freely.
+ARG BASE_IMAGE=dustynv/ros:humble-ros-base-l4t-r36.3.0
 FROM ${BASE_IMAGE}
 
 # Empty by default. Set to the Jetson AI Lab mirror matching your

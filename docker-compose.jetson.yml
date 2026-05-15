@@ -18,8 +18,11 @@
 # before running compose (or edit the defaults under the `base` service):
 #
 #   JetPack 6.x (L4T r36.*) -- no combined ros+pytorch image exists, so
-#   use a desktop ROS image and pull torch from the Jetson AI Lab mirror:
-#     export BASE_IMAGE=dustynv/ros:humble-desktop-l4t-r36.4.0
+#   use a ros-base ROS image and pull torch from the Jetson AI Lab
+#   mirror. Pick ros-base over desktop: the desktop variant ships an
+#   OpenCV in /usr/ that collides with apt's libopencv-*-dev (dpkg
+#   "trying to overwrite"):
+#     export BASE_IMAGE=dustynv/ros:humble-ros-base-l4t-r36.3.0
 #     export PYPI_INDEX_URL=https://pypi.jetson-ai-lab.dev/jp6/cu126
 #
 #   JetPack 5.1.x (L4T r35.*) -- combined image already has torch, leave
@@ -74,7 +77,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile.base.jetson
       args:
-        BASE_IMAGE: ${BASE_IMAGE:-dustynv/ros:humble-desktop-l4t-r36.4.0}
+        BASE_IMAGE: ${BASE_IMAGE:-dustynv/ros:humble-ros-base-l4t-r36.3.0}
         PYPI_INDEX_URL: ${PYPI_INDEX_URL:-https://pypi.jetson-ai-lab.dev/jp6/cu126}
     image: ros2_vlm_vision-base-jetson:latest
     command: ["true"]
