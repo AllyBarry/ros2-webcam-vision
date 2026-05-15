@@ -97,6 +97,10 @@ services:
       args:
         BASE_IMAGE: ${BASE_IMAGE:-dustynv/ros:humble-ros-base-l4t-r36.3.0}
         PYPI_INDEX_URL: ${PYPI_INDEX_URL:-https://pypi.jetson-ai-lab.dev/jp6/cu126}
+        # apriltag_ros has been brittle to build on L4T. Default off;
+        # set BUILD_APRILTAG_ROS=1 to attempt it (extrinsic calibration
+        # only).
+        BUILD_APRILTAG_ROS: ${BUILD_APRILTAG_ROS:-0}
     image: ros2_vlm_vision-base-jetson:latest
     command: ["true"]
 

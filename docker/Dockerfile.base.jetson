@@ -41,6 +41,12 @@
 ARG BASE_IMAGE=dustynv/ros:humble-ros-base-l4t-r36.3.0
 FROM ${BASE_IMAGE}
 
+# apriltag_ros only powers `calibration.launch.py mode:=extrinsic`.
+# Building it on dustynv L4T has been brittle (linker failures we
+# couldn't pin without full logs), so it's off by default. Set to 1 to
+# attempt the build -- if it fails, the rest of the image still ships.
+ARG BUILD_APRILTAG_ROS=0
+
 # Set to the Jetson AI Lab mirror matching your JetPack/CUDA when
 # BASE_IMAGE doesn't include torch (any r36 variant). Empty no-ops the
 # pip torch install (use for r35 humble-pytorch-l4t-* images).
@@ -103,8 +109,10 @@ WORKDIR /opt/ros_overlay/src
 RUN git clone --depth=1 -b humble https://github.com/ros-perception/vision_opencv.git \
  && git clone --depth=1 -b humble https://github.com/ros-perception/image_pipeline.git \
  && git clone --depth=1 -b humble https://gitlab.com/boldhearts/ros2_v4l2_camera.git \
- && git clone --depth=1 -b 2.0.1   https://github.com/christianrauch/apriltag_msgs.git \
- && git clone --depth=1 -b 3.2.1   https://github.com/christianrauch/apriltag_ros.git
+ && if [ "$BUILD_APRILTAG_ROS" = "1" ]; then \
+        git clone --depth=1 -b 2.0.1 https://github.com/christianrauch/apriltag_msgs.git \
+     && git clone --depth=1 -b 3.2.1 https://github.com/christianrauch/apriltag_ros.git ; \
+    fi
 
 # rosdep system deps for the source workspace, with --skip-keys naming
 # every libopencv-* package so rosdep doesn't try to apt-install Jammy's
