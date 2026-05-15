@@ -9,6 +9,12 @@ if [ -f /opt/ros/humble/setup.bash ]; then
 elif [ -f /opt/ros/humble/install/setup.bash ]; then
     source /opt/ros/humble/install/setup.bash
 fi
+# Jetson overlay: cv_bridge, image_pipeline, v4l2_camera, apriltag_ros
+# source-built against dustynv's OpenCV. Absent on the CPU build, so
+# this is conditional.
+if [ -f /opt/ros_overlay/install/setup.bash ]; then
+    source /opt/ros_overlay/install/setup.bash
+fi
 source /ros_ws/install/setup.bash
 
 # v4l2_camera owns the V4L2 controls: it declares a ROS parameter for

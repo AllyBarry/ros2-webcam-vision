@@ -19,15 +19,18 @@ COPY launch       ./launch
 COPY config       ./config
 
 WORKDIR /ros_ws
-# dustynv builds ROS from source into /opt/ros/humble/install/, whereas
-# osrf's ros:humble-* installs via apt and places setup.bash directly
-# under /opt/ros/humble/. Source whichever exists so this image works on
-# either layout.
+# Source order matters:
+#   1. dustynv's ROS install (apt-style at /opt/ros/humble/setup.sh, or
+#      dustynv source-built at /opt/ros/humble/install/setup.sh)
+#   2. /opt/ros_overlay (cv_bridge, image_pipeline, v4l2_camera,
+#      apriltag_ros -- source-built in Dockerfile.base.jetson)
+# so cv_bridge etc. are on AMENT_PREFIX_PATH when colcon builds our app.
 RUN if [ -f /opt/ros/humble/install/setup.sh ]; then \
         . /opt/ros/humble/install/setup.sh ; \
     else \
         . /opt/ros/humble/setup.sh ; \
     fi \
+ && . /opt/ros_overlay/install/setup.sh \
  && colcon build --packages-select ros2_vlm_vision --symlink-install
 
 # ---- Helper scripts + entrypoint (frequent edits) ---------------------
