@@ -19,7 +19,15 @@ COPY launch       ./launch
 COPY config       ./config
 
 WORKDIR /ros_ws
-RUN . /opt/ros/humble/setup.sh \
+# dustynv builds ROS from source into /opt/ros/humble/install/, whereas
+# osrf's ros:humble-* installs via apt and places setup.bash directly
+# under /opt/ros/humble/. Source whichever exists so this image works on
+# either layout.
+RUN if [ -f /opt/ros/humble/install/setup.sh ]; then \
+        . /opt/ros/humble/install/setup.sh ; \
+    else \
+        . /opt/ros/humble/setup.sh ; \
+    fi \
  && colcon build --packages-select ros2_vlm_vision --symlink-install
 
 # ---- Helper scripts + entrypoint (frequent edits) ---------------------

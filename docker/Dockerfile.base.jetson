@@ -51,6 +51,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
+# Refresh the ROS 2 apt signing key. The dustynv r36.* images were built
+# before Open Robotics rotated the key in May 2025; the baked-in key now
+# fails `apt-get update` with:
+#   GPG error: ... EXPKEYSIG F42ED6FBAB17C654 Open Robotics
+# Pull the current key straight from upstream rosdistro and overwrite the
+# keyring. Idempotent on images that already have the new key.
+RUN curl -fsSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+        -o /usr/share/keyrings/ros-archive-keyring.gpg
+
 # Most of these are present in dustynv's image already; apt is idempotent.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-pip \

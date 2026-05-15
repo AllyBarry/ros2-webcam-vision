@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 set -e
 
-source /opt/ros/humble/setup.bash
+# osrf's ros:humble-* (CPU build) places setup.bash at /opt/ros/humble/.
+# dustynv's L4T images (Jetson build) build ROS from source and place it
+# at /opt/ros/humble/install/setup.bash. Source whichever exists.
+if [ -f /opt/ros/humble/setup.bash ]; then
+    source /opt/ros/humble/setup.bash
+elif [ -f /opt/ros/humble/install/setup.bash ]; then
+    source /opt/ros/humble/install/setup.bash
+fi
 source /ros_ws/install/setup.bash
 
 # v4l2_camera owns the V4L2 controls: it declares a ROS parameter for
