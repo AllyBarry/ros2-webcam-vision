@@ -1,16 +1,18 @@
-# ros2_vlm_vision app image (Jetson / aarch64)
-# FROMs the prebuilt Jetson base; only the package source + colcon build
-# live here. Mirrors docker/Dockerfile (the desktop/CPU variant) so that
-# rebuild semantics are identical: editing only entrypoint.sh or a script
-# does not re-run colcon.
+# ros2_vlm_vision app image (Jetson / aarch64) -- MINIMAL VARIANT
+# Mirrors the simplified docker/Dockerfile.base.jetson. The colcon build
+# of the app package is commented out so the image builds even before
+# the overlay (cv_bridge etc.) is ready. Bring it back once the base
+# image is fully populated.
 #
-# Build order:
 #   docker compose -f docker-compose.jetson.yml --profile build build base
 #   docker compose -f docker-compose.jetson.yml build vlm
 ARG BASE_IMAGE=ros2_vlm_vision-base-jetson:latest
 FROM ${BASE_IMAGE}
 
-# ---- ROS package: source + manifest, then colcon build -----------------
+# ---- ROS package source: COPYed in but not yet built ------------------
+# We still copy the source so it's available inside the container for
+# interactive iteration (`colcon build --packages-select ros2_vlm_vision`
+# inside the container once the overlay/torch are working).
 WORKDIR /ros_ws/src/ros2_vlm_vision
 COPY package.xml setup.py setup.cfg ./
 COPY resource     ./resource
@@ -18,20 +20,18 @@ COPY ros2_vlm_vision ./ros2_vlm_vision
 COPY launch       ./launch
 COPY config       ./config
 
+# ----------------------------------------------------------------------
+# colcon build  [STATUS: requires base image Step 4 (ROS overlay) to be
+# built first so cv_bridge etc. are discoverable. Uncomment when ready.]
+# ----------------------------------------------------------------------
 WORKDIR /ros_ws
-# Source order matters:
-#   1. dustynv's ROS install (apt-style at /opt/ros/humble/setup.sh, or
-#      dustynv source-built at /opt/ros/humble/install/setup.sh)
-#   2. /opt/ros_overlay (cv_bridge, image_pipeline, v4l2_camera,
-#      apriltag_ros -- source-built in Dockerfile.base.jetson)
-# so cv_bridge etc. are on AMENT_PREFIX_PATH when colcon builds our app.
-RUN if [ -f /opt/ros/humble/install/setup.sh ]; then \
-        . /opt/ros/humble/install/setup.sh ; \
-    else \
-        . /opt/ros/humble/setup.sh ; \
-    fi \
- && . /opt/ros_overlay/install/setup.sh \
- && colcon build --packages-select ros2_vlm_vision --symlink-install
+# RUN if [ -f /opt/ros/humble/install/setup.sh ]; then \
+#         . /opt/ros/humble/install/setup.sh ; \
+#     else \
+#         . /opt/ros/humble/setup.sh ; \
+#     fi \
+#  && . /opt/ros_overlay/install/setup.sh \
+#  && colcon build --packages-select ros2_vlm_vision --symlink-install
 
 # ---- Helper scripts + entrypoint (frequent edits) ---------------------
 COPY docker/entrypoint.sh /entrypoint.sh
@@ -40,6 +40,8 @@ RUN chmod +x /entrypoint.sh \
         /usr/local/bin/save_camera_settings.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
-# Default to GPU on Jetson -- override per-service in docker-compose.jetson.yml
-# if you need CPU inference for comparison.
-CMD ["ros2", "launch", "ros2_vlm_vision", "vision_stack.launch.py", "device:=cuda:0"]
+# Default to a shell so the container is usable for interactive
+# iteration; switch back to `ros2 launch ros2_vlm_vision
+# vision_stack.launch.py device:=cuda:0` once the colcon build above
+# is enabled.
+CMD ["bash"]

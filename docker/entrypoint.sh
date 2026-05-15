@@ -15,7 +15,12 @@ fi
 if [ -f /opt/ros_overlay/install/setup.bash ]; then
     source /opt/ros_overlay/install/setup.bash
 fi
-source /ros_ws/install/setup.bash
+# App workspace: only present once the app's colcon build has run.
+# In the simplified Jetson Dockerfile the colcon step is commented out
+# until the base image's overlay is ready, so this is conditional too.
+if [ -f /ros_ws/install/setup.bash ]; then
+    source /ros_ws/install/setup.bash
+fi
 
 # v4l2_camera owns the V4L2 controls: it declares a ROS parameter for
 # every control and pushes the parameter value to the device at startup,
