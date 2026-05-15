@@ -4,32 +4,54 @@
 #
 #   docker compose -f docker-compose.jetson.yml --profile build build base
 #
-# Starts from dusty-nv's prebuilt ROS Humble + PyTorch image for L4T,
-# which already ships:
-#   - CUDA / cuDNN / TensorRT matched to the L4T tag
-#   - PyTorch + torchvision built against that CUDA (do NOT pip reinstall
-#     these from PyPI -- the upstream aarch64 wheels are CPU-only and will
-#     silently break GPU inference)
-#   - OpenCV (often with CUDA)
-#   - ROS Humble desktop-ish stack
+# ----------------------------------------------------------------------
+# Picking BASE_IMAGE and PYPI_INDEX_URL for your Jetson
+# ----------------------------------------------------------------------
+# Find your L4T tag on the Jetson:
+#   cat /etc/nv_tegra_release | head -1
+#   # e.g. "# R36 (release), REVISION: 4.0" -> tag is r36.4.0
 #
-# Pick the L4T tag matching your JetPack:
-#   JetPack 6.x  -> r36.2.0 / r36.3.0 / r36.4.0
-#   JetPack 5.1.x -> r35.4.1
-# Override at build time:
-#   docker compose -f docker-compose.jetson.yml --profile build build base \
-#       --build-arg L4T_TAG=r36.4.0
-ARG L4T_TAG=r36.4.0
-FROM dustynv/ros:humble-pytorch-l4t-${L4T_TAG}
+# dustynv/jetson-containers publishes different image families for
+# different L4T tags, so the right BASE_IMAGE differs by JetPack:
+#
+#   JetPack 5.x (L4T r35.*): combined ROS+PyTorch images exist, just point
+#     BASE_IMAGE at one of these and leave PYPI_INDEX_URL empty:
+#       dustynv/ros:humble-pytorch-l4t-r35.4.1
+#       dustynv/ros:humble-pytorch-l4t-r35.3.1
+#       dustynv/ros:humble-pytorch-l4t-r35.2.1
+#
+#   JetPack 6.x (L4T r36.*): NO combined image exists, so use a plain
+#     ROS image and install CUDA-enabled torch via Jetson AI Lab's PyPI
+#     mirror:
+#       BASE_IMAGE=dustynv/ros:humble-desktop-l4t-r36.4.0   (JP 6.1 / 6.2)
+#       BASE_IMAGE=dustynv/ros:humble-desktop-l4t-r36.2.0   (JP 6.0)
+#       BASE_IMAGE=dustynv/ros:humble-ros-base-l4t-r36.3.0  (lighter)
+#       PYPI_INDEX_URL=https://pypi.jetson-ai-lab.dev/jp6/cu126
+#
+# Build with overrides via docker-compose.jetson.yml's build.args, or:
+#   docker build \
+#       --build-arg BASE_IMAGE=dustynv/ros:humble-desktop-l4t-r36.4.0 \
+#       --build-arg PYPI_INDEX_URL=https://pypi.jetson-ai-lab.dev/jp6/cu126 \
+#       -f docker/Dockerfile.base.jetson -t ros2_vlm_vision-base-jetson:latest .
+# ----------------------------------------------------------------------
+
+ARG BASE_IMAGE=dustynv/ros:humble-desktop-l4t-r36.4.0
+FROM ${BASE_IMAGE}
+
+# Empty by default. Set to the Jetson AI Lab mirror matching your
+# JetPack/CUDA when BASE_IMAGE doesn't already include torch (any r36
+# variant). Leave empty for r35 humble-pytorch-l4t-* images.
+#   JetPack 6.x with CUDA 12.6: https://pypi.jetson-ai-lab.dev/jp6/cu126
+#   JetPack 6.x with CUDA 12.8: https://pypi.jetson-ai-lab.dev/jp6/cu128
+#   JetPack 5.x with CUDA 11.4: https://pypi.jetson-ai-lab.dev/jp5/cu114
+ARG PYPI_INDEX_URL=""
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# Most of these are present in dustynv's image already; install is
-# idempotent and a no-op when satisfied. apriltag_ros and foxglove_bridge
-# are the two most commonly missing from the slimmer L4T variants.
+# Most of these are present in dustynv's image already; apt is idempotent.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-pip \
         python3-colcon-common-extensions \
@@ -49,19 +71,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         usbutils \
     && rm -rf /var/lib/apt/lists/*
 
-# Ultralytics on Jetson: install WITHOUT pulling torch/torchvision from
-# PyPI, since the L4T base already provides CUDA-enabled wheels and the
-# upstream aarch64 wheels are CPU-only.
-#
-# numpy is held to <2 to keep the apt-shipped ros-humble-cv-bridge boost
-# extension loadable (it's built against the NumPy 1.x C ABI).
+# Install torch/torchvision from the Jetson AI Lab PyPI mirror when
+# PYPI_INDEX_URL is set (i.e. base image does not already provide them).
+# When BASE_IMAGE is the r35 humble-pytorch-l4t-* family, leave
+# PYPI_INDEX_URL empty and this step is a no-op.
 ARG PIP_OPTS="--retries 10 --timeout 120"
+RUN if [ -n "$PYPI_INDEX_URL" ]; then \
+        pip3 install $PIP_OPTS --extra-index-url "$PYPI_INDEX_URL" \
+            torch torchvision ; \
+    fi
+
+# Ultralytics with --no-deps so pip doesn't try to overwrite the CUDA
+# torch wheel with a PyPI CPU-only wheel. Then add ultralytics' non-torch
+# runtime deps explicitly, with numpy held at <2 to keep the apt-shipped
+# cv_bridge boost extension loadable (NumPy 1.x C ABI).
 RUN pip3 install $PIP_OPTS --no-deps ultralytics \
  && pip3 install $PIP_OPTS \
         'numpy<2' \
         'opencv-python>=4.6,<4.13' \
         pyyaml requests tqdm psutil py-cpuinfo matplotlib pandas seaborn \
- && python3 -c "import torch; print(f'torch {torch.__version__} installed (CUDA check deferred to runtime)')" \
+ && python3 -c "import torch; print(f'torch {torch.__version__} (CUDA check deferred to runtime)')" \
  && python3 -c "import numpy, sys; v = numpy.__version__; \
         sys.exit(0 if v.startswith('1.') else \
                  (print(f'numpy {v} leaked into the image', file=sys.stderr) or 1))"
