@@ -30,14 +30,25 @@
 #     export BASE_IMAGE=dustynv/ros:humble-pytorch-l4t-r35.4.1
 #     export PYPI_INDEX_URL=
 #
-# GUI services (`tune`) need the host X server. On Jetson, grant the
-# container access from the host shell once per login session:
-#   xhost +local:docker
-# (the WSL `tune` service doesn't need this -- WSLg accepts containerised
-# clients by default. This is a Jetson-only step.)
+# GUI services (`tune`) need access to the host's X server. Two cases:
+#
+#   A. Local Jetson desktop (terminal opened inside the desktop session):
+#        xhost +local:docker                  # one-time per login session
+#        ... then run compose normally.
+#
+#   B. SSH session with X11 forwarding (`ssh -Y jetson` -- DISPLAY is
+#      "localhost:NN.0"): xhost is not enough, the container also needs
+#      the SSH-forwarded auth cookie. Run once per SSH session:
+#        export XAUTH=/tmp/.docker.xauth
+#        rm -f $XAUTH && touch $XAUTH
+#        xauth nlist $DISPLAY | sed -e 's/^..../ffff/' | xauth -f $XAUTH nmerge -
+#        chmod 644 $XAUTH
+#      The compose mounts $XAUTH into the container.  Use `ssh -Y` not
+#      `ssh -X` -- the SECURITY-extension restrictions on -X reject the
+#      container's connections regardless of the cookie.
 #
 # Recommended order on a fresh setup:
-#   xhost +local:docker                                                       # host: allow X clients
+#   # one-time per session (case A or B above)
 #   docker compose -f docker-compose.jetson.yml --profile build build base   # ~20-30 min on Orin Nano
 #   docker compose -f docker-compose.jetson.yml build vlm                    # fast subsequent (~30 s)
 #   docker compose -f docker-compose.jetson.yml --profile tune run --rm tune  # adjust focus/exposure
@@ -98,20 +109,17 @@ services:
     restart: unless-stopped
 
   # Interactive control tuner. Opens qv4l2 with a live preview using the
-  # host's X server.
+  # host's X server. See the top-of-file comment for the host-side
+  # setup required (xhost OR an xauth file mount).
   #
-  # Before running on a Jetson, grant the container access to the X
-  # display from the host shell:
-  #     xhost +local:docker        # one-time per login session
-  # Then run:
-  #     docker compose -f docker-compose.jetson.yml --profile tune run --rm tune
+  # Uses network_mode: host so the container reaches both the X socket
+  # (local desktop case) and the SSH-forwarded TCP display
+  # localhost:NN.0 (SSH X11 case).
   #
-  # Uses network_mode: host for X (loopback) + DDS sharing with native
-  # ROS processes. The XAUTHORITY bind-mount dance the WSL variant uses
-  # is unnecessary here -- `xhost +local:docker` plus mounting the X
-  # socket is all qv4l2 needs, and avoids the previous compose's
-  # ${XAUTHORITY:-/dev/null}:/root/.Xauthority:ro fallback (which fails
-  # to bind-mount /dev/null on SSH sessions where XAUTHORITY is unset).
+  # XAUTH defaults to /tmp/.docker.xauth -- harmless when not in the SSH
+  # case as long as you ran the xhost step. Override with
+  #     XAUTH=/some/path docker compose ... run --rm tune
+  # or pre-create /tmp/.docker.xauth (the readme snippet does this).
   tune:
     <<: *vlm_base
     profiles: ["tune"]
@@ -120,8 +128,9 @@ services:
     environment:
       ROS_DOMAIN_ID: "0"
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
-      CAMERA_DEVICE: /dev/video0
+      CAMERA_DEVICE: ${CAMERA_DEVICE:-/dev/video0}
       DISPLAY: ${DISPLAY:-:0}
+      XAUTHORITY: /tmp/.docker.xauth
       QT_X11_NO_MITSHM: "1"
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: all
@@ -129,8 +138,9 @@ services:
       - /dev:/dev
       - ./camera_info:/root/.ros/camera_info
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ${XAUTH:-/tmp/.docker.xauth}:/tmp/.docker.xauth:ro
     entrypoint: ["/entrypoint.sh"]
-    command: ["qv4l2", "-d", "/dev/video0"]
+    command: ["qv4l2", "-d", "${CAMERA_DEVICE:-/dev/video0}"]
     restart: "no"
 
   # Dumps the live v4l2 control state back to camera_info/v4l2_params.yaml
