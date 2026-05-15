@@ -93,10 +93,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # master pulls in `camera_ros` as a transitive dep, which itself depends
 # on cv_bridge -> libopencv-*-dev and re-triggers the dpkg overwrite
 # conflict against dustynv's OpenCV. 3.2.1 predates that dependency.
+#
+# apriltag_msgs is source-cloned too (rather than apt-installed via
+# rosdep) because `ros-humble-apriltag-msgs` isn't reliably resolvable
+# from L4T's arm64 jammy mirror, leaving cmake unable to find
+# apriltag_msgs at colcon build time. It's a thin message-only package
+# (no OpenCV deps) so building it from source is cheap.
 WORKDIR /opt/ros_overlay/src
 RUN git clone --depth=1 -b humble https://github.com/ros-perception/vision_opencv.git \
  && git clone --depth=1 -b humble https://github.com/ros-perception/image_pipeline.git \
  && git clone --depth=1 -b humble https://gitlab.com/boldhearts/ros2_v4l2_camera.git \
+ && git clone --depth=1 -b 2.0.1   https://github.com/christianrauch/apriltag_msgs.git \
  && git clone --depth=1 -b 3.2.1   https://github.com/christianrauch/apriltag_ros.git
 
 # rosdep system deps for the source workspace, with --skip-keys naming
