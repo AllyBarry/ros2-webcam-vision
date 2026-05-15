@@ -103,7 +103,14 @@ ENV YOLO_CONFIG_DIR=/ros_ws
 #      layer reintroduces it). Then add PyPI as the extra-index so
 #      ultralytics' non-CUDA Python deps still resolve.
 # ----------------------------------------------------------------------
-ARG PYPI_INDEX_URL="https://pypi.jetson-ai-lab.io/jp6/cu126"
+# CUDA-toolchain version on the Jetson AI Lab mirror must match the
+# cuDNN that ships with the BASE_IMAGE's L4T tag:
+#   r36.2.0 / r36.3.0 (JetPack 6.0)     -> jp6/cu122 (cuDNN 8)
+#   r36.4.0          (JetPack 6.1/6.2)  -> jp6/cu126 (cuDNN 9)
+#   r35.*            (JetPack 5.1.x)    -> jp5/cu114 (cuDNN 8.6)
+# A mismatch (e.g. cu126 wheel on a cu122 base) fails at import time
+# with "libcudnn.so.9: cannot open shared object file".
+ARG PYPI_INDEX_URL="https://pypi.jetson-ai-lab.io/jp6/cu122"
 ARG PIP_OPTS="--retries 10 --timeout 120"
 RUN rm -f /etc/pip.conf /etc/pip3.conf /root/.pip/pip.conf /root/.config/pip/pip.conf \
  && pip3 install $PIP_OPTS \
@@ -167,8 +174,7 @@ RUN if [ -f /opt/ros/humble/install/setup.sh ]; then \
 # ----------------------------------------------------------------------
 RUN pip3 install $PIP_OPTS --no-deps ultralytics \
  && pip3 install $PIP_OPTS \
-        'numpy<2' \
-        pyyaml requests tqdm psutil py-cpuinfo matplotlib pandas seaborn
+        numpy pyyaml requests tqdm psutil py-cpuinfo matplotlib pandas seaborn
 
 # ----------------------------------------------------------------------
 # Step 6: pre-fetch YOLOv8 weights so first run is offline-safe

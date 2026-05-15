@@ -97,7 +97,9 @@ services:
       dockerfile: docker/Dockerfile.base.jetson
       args:
         BASE_IMAGE: ${BASE_IMAGE:-dustynv/ros:humble-ros-base-l4t-r36.3.0}
-        PYPI_INDEX_URL: ${PYPI_INDEX_URL:-https://pypi.jetson-ai-lab.io/jp6/cu126}
+        # cuXXX must match BASE_IMAGE's L4T cuDNN. Default cu122 pairs
+        # with r36.3.0 (JP 6.0, cuDNN 8). Use cu126 for r36.4.0 (JP 6.1+).
+        PYPI_INDEX_URL: ${PYPI_INDEX_URL:-https://pypi.jetson-ai-lab.io/jp6/cu122}
         # apriltag_ros has been brittle to build on L4T. Default off;
         # set BUILD_APRILTAG_ROS=1 to attempt it (extrinsic calibration
         # only).
