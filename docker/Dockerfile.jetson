@@ -21,17 +21,17 @@ COPY launch       ./launch
 COPY config       ./config
 
 # ----------------------------------------------------------------------
-# colcon build  [STATUS: requires base image Step 4 (ROS overlay) to be
-# built first so cv_bridge etc. are discoverable. Uncomment when ready.]
+# colcon build: source dustynv's ROS first, then the /opt/ros_overlay
+# built in the base image (cv_bridge etc.), then build the app package.
 # ----------------------------------------------------------------------
 WORKDIR /ros_ws
-# RUN if [ -f /opt/ros/humble/install/setup.sh ]; then \
-#         . /opt/ros/humble/install/setup.sh ; \
-#     else \
-#         . /opt/ros/humble/setup.sh ; \
-#     fi \
-#  && . /opt/ros_overlay/install/setup.sh \
-#  && colcon build --packages-select ros2_vlm_vision --symlink-install
+RUN if [ -f /opt/ros/humble/install/setup.sh ]; then \
+        . /opt/ros/humble/install/setup.sh ; \
+    else \
+        . /opt/ros/humble/setup.sh ; \
+    fi \
+ && . /opt/ros_overlay/install/setup.sh \
+ && colcon build --packages-select ros2_vlm_vision --symlink-install
 
 # ---- Helper scripts + entrypoint (frequent edits) ---------------------
 COPY docker/entrypoint.sh /entrypoint.sh
@@ -40,8 +40,6 @@ RUN chmod +x /entrypoint.sh \
         /usr/local/bin/save_camera_settings.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
-# Default to a shell so the container is usable for interactive
-# iteration; switch back to `ros2 launch ros2_vlm_vision
-# vision_stack.launch.py device:=cuda:0` once the colcon build above
-# is enabled.
-CMD ["bash"]
+# Default to GPU on Jetson; override per-service in docker-compose.jetson.yml
+# if you need CPU inference (e.g. `command: ... device:=cpu`).
+CMD ["ros2", "launch", "ros2_vlm_vision", "vision_stack.launch.py", "device:=cuda:0"]

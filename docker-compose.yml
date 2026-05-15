@@ -39,9 +39,10 @@ x-vlm-base: &vlm_base
   environment:
     ROS_DOMAIN_ID: "0"
     RMW_IMPLEMENTATION: rmw_fastrtps_cpp
-    # Default capture device. Override per service (or via env) if your
-    # webcam exposes its capture interface on a different /dev/videoN.
-    CAMERA_DEVICE: /dev/video0
+    # Default capture device. Override via env (`CAMERA_DEVICE=/dev/video1
+    # docker compose run --rm <service>`) if your webcam exposes its
+    # capture interface on a different /dev/videoN.
+    CAMERA_DEVICE: ${CAMERA_DEVICE:-/dev/video0}
 
 services:
   # Heavy base image (ROS + apt + pip + YOLO weights + numpy check).

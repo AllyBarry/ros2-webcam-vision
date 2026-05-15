@@ -29,7 +29,13 @@ FROM ${BASE_IMAGE}
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    # dustynv r36.* images set PIP_INDEX_URL + PIP_TRUSTED_HOST to a
+    # webredirect.org host that no longer resolves. ENV-var settings
+    # take precedence over any pip.conf, so they have to be cleared
+    # here -- rm /etc/pip.conf alone isn't enough.
+    PIP_INDEX_URL= \
+    PIP_TRUSTED_HOST=
 
 # ----------------------------------------------------------------------
 # Step 1: refresh expired ROS apt key  [STATUS: works]
@@ -83,77 +89,97 @@ ENV YOLO_CONFIG_DIR=/ros_ws
 
 # ----------------------------------------------------------------------
 # Step 3: CUDA torch + torchvision from Jetson AI Lab mirror
-# [STATUS: failed -- DNS/host resolution issue from inside docker, also
-#  empty index page at /jp6/cu126/torch/. Test interactively with:
-#    docker compose run --rm tune bash
-#    pip3 install --extra-index-url https://pypi.jetson-ai-lab.io/jp6/cu126 torch torchvision
-#  If that doesn't work, try direct NVIDIA wheel URLs from
-#  https://forums.developer.nvidia.com/t/pytorch-for-jetson/72048 ]
+# [STATUS: verified working]
+#
+# Three gotchas baked in here:
+#   1. dustynv r36.* images set PIP_INDEX_URL/PIP_TRUSTED_HOST as ENV
+#      vars pointing at http://jetson.webredirect.org/jp6/cu122, a host
+#      that no longer resolves. ENV-var settings outrank pip.conf, so
+#      we clear them at the top of this Dockerfile (see the ENV block).
+#   2. We also rm /etc/pip.conf et al. as defense-in-depth -- not every
+#      dustynv variant uses env vars, some use files.
+#   3. Use `--index-url` (replaces primary), NOT `--extra-index-url`
+#      (which would still leave the dead host in the list if some other
+#      layer reintroduces it). Then add PyPI as the extra-index so
+#      ultralytics' non-CUDA Python deps still resolve.
 # ----------------------------------------------------------------------
-# ARG PYPI_INDEX_URL="https://pypi.jetson-ai-lab.io/jp6/cu126"
-# ARG PIP_OPTS="--retries 10 --timeout 120"
-# RUN if [ -n "$PYPI_INDEX_URL" ]; then \
-#         pip3 install $PIP_OPTS --extra-index-url "$PYPI_INDEX_URL" \
-#             torch torchvision ; \
-#     fi
+ARG PYPI_INDEX_URL="https://pypi.jetson-ai-lab.io/jp6/cu126"
+ARG PIP_OPTS="--retries 10 --timeout 120"
+RUN rm -f /etc/pip.conf /etc/pip3.conf /root/.pip/pip.conf /root/.config/pip/pip.conf \
+ && pip3 install $PIP_OPTS \
+        --index-url "$PYPI_INDEX_URL" \
+        --extra-index-url https://pypi.org/simple \
+        torch torchvision
 
 # ----------------------------------------------------------------------
 # Step 4: source-build OpenCV-dependent ROS packages
-# [STATUS: vision_opencv + image_pipeline + ros2_v4l2_camera build OK;
-#  apriltag_ros has unresolved linker error on dustynv L4T -- skipped
-#  for now via BUILD_APRILTAG_ROS=0.]
+# vision_opencv (cv_bridge), image_pipeline (image_proc), and
+# ros2_v4l2_camera link against dustynv's pre-installed OpenCV in /usr/.
+# We can't apt-install ros-humble-cv-bridge & friends because they pull
+# in libopencv-*-dev which dpkg-overwrite-collides with dustynv's
+# OpenCV. apriltag_ros is gated off by default because of an unresolved
+# linker error on dustynv L4T -- flip BUILD_APRILTAG_ROS=1 to attempt
+# it (only needed for extrinsic calibration).
 # ----------------------------------------------------------------------
-# ARG BUILD_APRILTAG_ROS=0
-# WORKDIR /opt/ros_overlay/src
-# RUN git clone --depth=1 -b humble https://github.com/ros-perception/vision_opencv.git \
-#  && git clone --depth=1 -b humble https://github.com/ros-perception/image_pipeline.git \
-#  && git clone --depth=1 -b humble https://gitlab.com/boldhearts/ros2_v4l2_camera.git \
-#  && if [ "$BUILD_APRILTAG_ROS" = "1" ]; then \
-#         git clone --depth=1 -b 2.0.1 https://github.com/christianrauch/apriltag_msgs.git \
-#      && git clone --depth=1 -b 3.2.1 https://github.com/christianrauch/apriltag_ros.git ; \
-#     fi
-#
-# RUN apt-get update \
-#  && (rosdep init 2>/dev/null || true) \
-#  && rosdep update --rosdistro humble \
-#  && rosdep install -y --from-paths /opt/ros_overlay/src --ignore-src \
-#         --rosdistro humble \
-#         --skip-keys "libopencv-dev libopencv-core-dev libopencv-imgproc-dev \
-#             libopencv-imgcodecs-dev libopencv-videoio-dev libopencv-highgui-dev \
-#             libopencv-ml-dev libopencv-features2d-dev libopencv-calib3d-dev \
-#             libopencv-flann-dev libopencv-dnn-dev libopencv-objdetect-dev \
-#             libopencv-photo-dev libopencv-video-dev libopencv-shape-dev \
-#             libopencv-stitching-dev libopencv-superres-dev libopencv-videostab-dev \
-#             libopencv-contrib-dev python3-opencv \
-#             camera_ros libcamera" \
-#  && rm -rf /var/lib/apt/lists/*
-#
-# WORKDIR /opt/ros_overlay
-# RUN if [ -f /opt/ros/humble/install/setup.sh ]; then \
-#         . /opt/ros/humble/install/setup.sh ; \
-#     else \
-#         . /opt/ros/humble/setup.sh ; \
-#     fi \
-#  && colcon build --merge-install \
-#         --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+ARG BUILD_APRILTAG_ROS=0
+WORKDIR /opt/ros_overlay/src
+RUN git clone --depth=1 -b humble https://github.com/ros-perception/vision_opencv.git \
+ && git clone --depth=1 -b humble https://github.com/ros-perception/image_pipeline.git \
+ && git clone --depth=1 -b humble https://gitlab.com/boldhearts/ros2_v4l2_camera.git \
+ && if [ "$BUILD_APRILTAG_ROS" = "1" ]; then \
+        git clone --depth=1 -b 2.0.1 https://github.com/christianrauch/apriltag_msgs.git \
+     && git clone --depth=1 -b 3.2.1 https://github.com/christianrauch/apriltag_ros.git ; \
+    fi
+
+RUN apt-get update \
+ && (rosdep init 2>/dev/null || true) \
+ && rosdep update --rosdistro humble \
+ && rosdep install -y --from-paths /opt/ros_overlay/src --ignore-src \
+        --rosdistro humble \
+        --skip-keys "libopencv-dev libopencv-core-dev libopencv-imgproc-dev \
+            libopencv-imgcodecs-dev libopencv-videoio-dev libopencv-highgui-dev \
+            libopencv-ml-dev libopencv-features2d-dev libopencv-calib3d-dev \
+            libopencv-flann-dev libopencv-dnn-dev libopencv-objdetect-dev \
+            libopencv-photo-dev libopencv-video-dev libopencv-shape-dev \
+            libopencv-stitching-dev libopencv-superres-dev libopencv-videostab-dev \
+            libopencv-contrib-dev python3-opencv \
+            camera_ros libcamera" \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/ros_overlay
+RUN if [ -f /opt/ros/humble/install/setup.sh ]; then \
+        . /opt/ros/humble/install/setup.sh ; \
+    else \
+        . /opt/ros/humble/setup.sh ; \
+    fi \
+ && colcon build --merge-install \
+        --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
 
 # ----------------------------------------------------------------------
-# Step 5: ultralytics + non-torch python deps  [STATUS: not yet tested]
+# Step 5: ultralytics + non-torch python deps
+# ultralytics is installed with --no-deps so pip doesn't replace the
+# CUDA torch wheel from Step 3 with a PyPI CPU-only one. We then layer
+# in ultralytics' non-torch runtime deps explicitly. numpy is pinned to
+# <2 to keep cv_bridge's NumPy 1.x C ABI loadable. opencv-python is
+# intentionally NOT installed -- dustynv's pre-installed cv2 already
+# provides Python bindings (with CUDA), and a pip wheel would shadow
+# them with a CPU-only build.
 # ----------------------------------------------------------------------
-# RUN pip3 install $PIP_OPTS --no-deps ultralytics \
-#  && pip3 install $PIP_OPTS \
-#         'numpy<2' \
-#         pyyaml requests tqdm psutil py-cpuinfo matplotlib pandas seaborn
+RUN pip3 install $PIP_OPTS --no-deps ultralytics \
+ && pip3 install $PIP_OPTS \
+        'numpy<2' \
+        pyyaml requests tqdm psutil py-cpuinfo matplotlib pandas seaborn
 
 # ----------------------------------------------------------------------
 # Step 6: pre-fetch YOLOv8 weights so first run is offline-safe
-# [STATUS: requires step 3 + 5 to be enabled]
 # ----------------------------------------------------------------------
-# RUN python3 -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
+RUN python3 -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
 
 # ----------------------------------------------------------------------
-# Sanity-check imports  [STATUS: enable after the steps above]
+# Sanity-check imports at build time so we fail fast if a layer broke
+# torch/cv2/numpy. CUDA availability check is deferred to runtime --
+# the build doesn't have --runtime nvidia.
 # ----------------------------------------------------------------------
-# RUN python3 -c "import torch; print(f'torch {torch.__version__}')" \
-#  && python3 -c "import cv2;   print(f'cv2   {cv2.__version__}')" \
-#  && python3 -c "import numpy; print(f'numpy {numpy.__version__}')"
+RUN python3 -c "import torch; print(f'torch {torch.__version__}')" \
+ && python3 -c "import cv2;   print(f'cv2   {cv2.__version__}')" \
+ && python3 -c "import numpy; print(f'numpy {numpy.__version__}')"
