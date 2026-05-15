@@ -69,28 +69,47 @@ services:
     networks: [ros]
     restart: unless-stopped
 
-  # Interactive control tuner. Opens qv4l2 with a live preview; user
-  # adjusts sliders, closes the window. WSLg / a host X server provides
-  # the display. After closing, run `docker compose run --rm save-settings`
-  # to persist the current control values to camera_info/camera_settings.txt.
+  # Interactive control tuner. Opens qv4l2 with a live preview.
+  #
+  # Cross-platform X11 plumbing:
+  #   - WSL2/WSLg: /tmp/.X11-unix + /mnt/wslg mounts give socket-based
+  #     access to WSLg's X server; no cookie needed.
+  #   - Jetson (or any Linux native) with SSH X11 forwarding
+  #     (DISPLAY=localhost:NN.0): the container needs a FamilyWild
+  #     auth cookie to authenticate against the forwarded display.
+  #     Generate one with:
+  #         export XAUTH=/tmp/.docker.xauth
+  #         rm -f $XAUTH && touch $XAUTH
+  #         xauth nlist $DISPLAY | sed -e 's/^..../ffff/' | xauth -f $XAUTH nmerge -
+  #     Then `XAUTH=$XAUTH docker compose run --rm tune` (or just
+  #     `docker compose run --rm tune` if you exported it).
+  #   - Jetson with a local desktop session: `xhost +local:docker` from
+  #     a terminal inside that session is enough.
+  #
+  # network_mode: host is required for the Jetson SSH case (the
+  # container needs to reach localhost:NN.0 on the host's namespace)
+  # and harmless on WSL2 (Docker Desktop with WSL2 backend supports
+  # host networking).
   tune:
     <<: *vlm_base
     profiles: ["tune"]
     container_name: vlm_tune
+    network_mode: host
     environment:
       ROS_DOMAIN_ID: "0"
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
-      CAMERA_DEVICE: /dev/video0
+      CAMERA_DEVICE: ${CAMERA_DEVICE:-/dev/video0}
       DISPLAY: ${DISPLAY:-:0}
+      XAUTHORITY: /tmp/.docker.xauth
       QT_X11_NO_MITSHM: "1"
     volumes:
       - /dev:/dev
       - ./camera_info:/root/.ros/camera_info
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - /mnt/wslg:/mnt/wslg:rw              # WSL2 / WSLg path; harmless if absent
+      - ${XAUTH:-/dev/null}:/tmp/.docker.xauth:ro
     entrypoint: ["/entrypoint.sh"]
     command: ["qv4l2", "-d", "/dev/video0"]
-    networks: [ros]
     restart: "no"
 
   # Dumps the live v4l2 control state back to camera_info/camera_settings.txt
