@@ -22,6 +22,7 @@ in-browser visualisation.
 - [Pipeline](#pipeline)
 - [Topics](#topics)
 - [Quick start (Docker, Windows / WSL2)](#quick-start-docker-windows--wsl2)
+- [Quick start (Docker, Jetson)](#quick-start-docker-jetson)
 - [Native build (Ubuntu 22.04 + ROS 2 Humble)](#native-build-ubuntu-2204--ros-2-humble)
 - [Selecting target objects](#selecting-target-objects)
 - [Camera settings (focus, exposure, white balance)](#camera-settings-focus-exposure-white-balance)
@@ -164,10 +165,84 @@ docker compose run --rm vlm \
 The chosen path is logged once at startup as
 `[ros2_vlm_vision] resolved video_device=/dev/v4l/by-id/usb-Logitech_BRIO_...-video-index0`.
 
-The default container runs CPU inference (`device:=cpu`). For NVIDIA GPU
-inference, swap the base image to a CUDA-enabled ROS Humble image, install
-a CUDA torch wheel, drop the `device:=cpu` override, and add the NVIDIA
-runtime reservation to the `vlm` service in `docker-compose.yml`.
+The default container in `docker-compose.yml` runs CPU inference
+(`device:=cpu`) because most x86 / WSL2 hosts lack the NVIDIA container
+runtime. For native Jetson GPU inference, see
+[Quick start (Docker, Jetson)](#quick-start-docker-jetson) — the separate
+`docker-compose.jetson.yml` defaults to `device:=cuda:0` and wires up
+the iGPU.
+
+## Quick start (Docker, Jetson)
+
+For NVIDIA Jetson (Orin Nano / NX / AGX) with JetPack 6.1 / 6.2 (L4T
+r36.4.x). Older JetPacks need `BASE_IMAGE` and `PYPI_INDEX_URL`
+overrides; see the top-of-file comments in
+[docker-compose.jetson.yml](docker-compose.jetson.yml).
+
+**Prerequisites**
+
+1. JetPack 6.1 or 6.2 flashed (provides CUDA 12.6 + cuDNN 9 + TensorRT 10).
+   Verify with `cat /etc/nv_tegra_release | head -1` — expect `R36 ... REVISION: 4.x`.
+2. The NVIDIA container runtime registered with Docker:
+   `docker info | grep -i 'Runtimes:'` should list `nvidia`.
+3. A UVC webcam plugged in (CSI cameras need a different capture stack).
+
+**Build and run** (from the package root):
+
+```bash
+# One-time: build the base image (~20-30 min on Orin NX). Pulls the
+# ~7 GB l4t-jetpack base, apt-installs ROS Humble, pip-installs torch
+# from the Jetson AI Lab cu126 mirror, pre-fetches YOLO weights.
+docker compose -f docker-compose.jetson.yml --profile build build base
+
+# Subsequent: fast app build (~5 s) -- just colcon + COPYs on top.
+docker compose -f docker-compose.jetson.yml build vlm
+docker compose -f docker-compose.jetson.yml up vlm
+
+# In-browser visualisation (foxglove_bridge on :8765):
+docker compose -f docker-compose.jetson.yml --profile viz up
+```
+
+**Sanity-check GPU access** through the container runtime:
+
+```bash
+docker compose -f docker-compose.jetson.yml run --rm --entrypoint python3 vlm \
+    -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+# expect: True Orin
+```
+
+**Foxglove access from a remote PC.** When you're SSH'd into the Jetson
+(directly, or through a jump host / bastion), the Foxglove WebSocket is
+plain TCP, so SSH local port forwarding tunnels it the same as any
+service. From your local PC:
+
+```bash
+# Direct SSH:
+ssh -N -L 8765:localhost:8765 user@jetson
+
+# Through a jump host (works with any number of hops, e.g. -J h1,h2,h3):
+ssh -N -L 8765:localhost:8765 -J user@jumphost user@jetson
+```
+
+Or add it once to `~/.ssh/config`:
+
+```ssh-config
+Host jetson
+  ProxyJump jumphost
+  LocalForward 8765 localhost:8765
+```
+
+then just `ssh -N jetson`. With the tunnel up, open Foxglove (desktop
+app or <https://app.foxglove.dev>), **Open connection → Foxglove
+WebSocket**, and connect to `ws://localhost:8765`. The browser hits
+your PC's `localhost`, SSH carries the WebSocket frames through the
+jump host, Docker forwards them to the bridge container.
+
+If `app.foxglove.dev` refuses the `ws://` URL on its HTTPS page (some
+browsers' mixed-content rule), use the **Foxglove Studio desktop app**
+instead — it has no such restriction. And confirm the bridge is
+actually up on the Jetson before connecting:
+`docker compose -f docker-compose.jetson.yml --profile viz ps`.
 
 ## Native build (Ubuntu 22.04 + ROS 2 Humble)
 
@@ -526,3 +601,31 @@ docker compose build --no-cache vlm
 docker compose run --rm --entrypoint python3 vlm -c "import numpy; print(numpy.__version__)"
 # expect 1.26.x
 ```
+
+**Jetson: `NvMapMemAllocInternalTagged: error 12` / `NVML_SUCCESS == r`
+on first GPU allocation.** The Jetson iGPU shares its memory pool with
+the system through the NvMap / CMA allocator. When other GPU-using
+processes on the host (camera nodes doing hardware MJPEG decode,
+`image_proc` rectification, anything calling `cv::cuda::*`) are
+holding the pool, the container can't get a contiguous block and
+torch's caching allocator aborts. `import torch` and
+`torch.cuda.is_available()` still succeed — it's only the first real
+allocation that fails. Find culprits on the host (not in the
+container) with:
+
+```bash
+ps aux --sort=-%mem | head -15      # look for *_node processes hogging RAM/CPU
+```
+
+Stop the offending host processes, or reboot to reset CMA fragmentation.
+This is not a Dockerfile / image issue — the same container works fine
+once the iGPU pool is free.
+
+**Jetson: torch `libcudss.so.0` / `libcusparse_lt.so.X` /
+`libopenblas.so.0: cannot open shared object file`.** A torch version
+that pulls in a runtime dep the host's JetPack doesn't ship. The pinned
+`torch==2.8.0` + `torchvision==0.23.0` in
+[docker/Dockerfile.base.jetson](docker/Dockerfile.base.jetson) is the
+last cu126 line that doesn't need cuDSS or cuSPARSELt; do not bump it
+without first confirming the new wheel's dlopen list against the
+host's JetPack release. `libopenblas0` is already in the apt list.

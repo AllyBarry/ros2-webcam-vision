@@ -1,186 +1,172 @@
-# ros2_vlm_vision-base (Jetson / aarch64) -- MINIMAL VARIANT
-# Heavy dependency steps are commented out so the base image builds
-# reliably first. Re-enable them one block at a time inside a running
-# container (`docker compose -f docker-compose.jetson.yml --profile tune
-# run --rm tune bash` to drop into a shell) and once a block works, copy
-# the commands into this Dockerfile and rebuild.
+# ros2_vlm_vision-base (Jetson / aarch64)
 #
-# Build order (once you've validated steps interactively):
-#   docker compose -f docker-compose.jetson.yml --profile build build base
+# Base: nvcr.io/nvidia/l4t-jetpack:r36.4.0
+#   - Official NVIDIA JetPack 6.1/6.2 image (matches L4T r36.4.x hosts).
+#   - Includes CUDA 12.6 + cuDNN 9 + TensorRT 10.3 baked into the image,
+#     so torch wheels link correctly at build time without --runtime nvidia.
+#   - On a JetPack 6.2 host the nvidia container runtime also bind-mounts
+#     the matching host libs at run time -- versions line up because both
+#     sides come from the same r36.4.0 / cuDNN 9 lane.
+#
+# Why this base instead of dustynv/ros:humble-...-l4t-r36.4.0?
+#   - dustynv ships an OpenCV in /usr/ that collides with apt's
+#     libopencv-*-dev, forcing us to source-build cv_bridge / image_pipeline
+#     / v4l2_camera. l4t-jetpack has no /usr/ OpenCV, so the ROS apt
+#     packages install cleanly.
+#   - No stale apt keys, no webredirect.org pip index to undo.
+#   - Officially maintained by NVIDIA.
 #
 # ----------------------------------------------------------------------
-# Picking BASE_IMAGE
+# Picking BASE_IMAGE for your L4T tag
 # ----------------------------------------------------------------------
-# Find your L4T tag on the Jetson:
-#   cat /etc/nv_tegra_release | head -1   # "R36 ... REVISION: 4.0" -> r36.4.0
+#   cat /etc/nv_tegra_release | head -1   # "# R36 ... REVISION: 4.3" -> r36.4.x
 #
-#   JetPack 5.x (L4T r35.*): combined ROS+PyTorch images exist:
-#       BASE_IMAGE=dustynv/ros:humble-pytorch-l4t-r35.4.1   (torch baked in)
+#   JetPack 6.1 / 6.2  (L4T r36.4.x)  -> nvcr.io/nvidia/l4t-jetpack:r36.4.0
+#   JetPack 6.0        (L4T r36.3.0)  -> nvcr.io/nvidia/l4t-jetpack:r36.3.0
+#   JetPack 5.1.x      (L4T r35.4.1)  -> nvcr.io/nvidia/l4t-jetpack:r35.4.1
 #
-#   JetPack 6.x (L4T r36.*): no combined image; use a ros-base image
-#     and install torch separately later:
-#       BASE_IMAGE=dustynv/ros:humble-ros-base-l4t-r36.3.0  (default)
-#       BASE_IMAGE=dustynv/ros:humble-ros-base-l4t-r36.2.0  (JP 6.0)
+# PYPI_INDEX_URL must match the base's CUDA major.minor:
+#   r36.4.x (CUDA 12.6, cuDNN 9) -> https://pypi.jetson-ai-lab.io/jp6/cu126
+#   r36.2-3 (CUDA 12.2, cuDNN 8) -> https://pypi.jetson-ai-lab.io/jp6/cu122
+#   r35.*   (CUDA 11.4, cuDNN 8) -> https://pypi.jetson-ai-lab.io/jp5/cu114
+# A mismatch (e.g. cu126 wheel on a cu122 base) fails at import time
+# with "libcudnn.so.9: cannot open shared object file".
 # ----------------------------------------------------------------------
 
-ARG BASE_IMAGE=dustynv/ros:humble-ros-base-l4t-r36.3.0
+ARG BASE_IMAGE=nvcr.io/nvidia/l4t-jetpack:r36.4.0
 FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    # dustynv r36.* images set PIP_INDEX_URL/PIP_TRUSTED_HOST to a
-    # webredirect.org host that no longer resolves. ENV-var settings
-    # take precedence over any pip.conf, so we have to clear them
-    # explicitly -- rm /etc/pip.conf alone isn't enough.
-    #
-    # Empty string is NOT the same as unset for pip: an empty
-    # PIP_INDEX_URL leaves pip in a broken state where wheel-fetch
-    # URLs come out without a scheme/host and connect attempts fail
-    # with "Network is unreachable". Point it at the real PyPI index;
-    # Step 3 overrides with --index-url for the Jetson mirror.
-    PIP_INDEX_URL=https://pypi.org/simple \
-    PIP_TRUSTED_HOST=pypi.org
+    LANG=en_US.UTF-8 \
+    LC_ALL=en_US.UTF-8 \
+    ROS_DISTRO=humble \
+    YOLO_CONFIG_DIR=/ros_ws
 
 # ----------------------------------------------------------------------
-# Step 1: refresh expired ROS apt key  [STATUS: works]
+# Step 1: locale + base utilities
 # ----------------------------------------------------------------------
-# dustynv r36.* images were built before Open Robotics rotated the key
-# in May 2025; the baked-in key now fails `apt-get update` with:
-#   GPG error: ... EXPKEYSIG F42ED6FBAB17C654 Open Robotics
-RUN curl -fsSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
-        -o /usr/share/keyrings/ros-archive-keyring.gpg
-
-# ----------------------------------------------------------------------
-# Step 2: apt packages that DON'T touch OpenCV  [STATUS: works]
-# ----------------------------------------------------------------------
-# OpenCV-dependent ROS packages (cv_bridge, image_proc, v4l2_camera,
-# apriltag_ros) are NOT installed here because their libopencv-*-dev
-# deps collide with dustynv's pre-installed OpenCV (dpkg "trying to
-# overwrite"). Source-build them in Step 4 below when ready.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3-pip \
-        python3-colcon-common-extensions \
-        python3-rosdep \
-        python3-vcstool \
-        ros-humble-vision-msgs \
-        ros-humble-image-transport \
+        locales curl gnupg2 lsb-release ca-certificates \
+ && locale-gen en_US en_US.UTF-8 \
+ && update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 \
+ && rm -rf /var/lib/apt/lists/*
+
+# ----------------------------------------------------------------------
+# Step 2: add the ROS 2 apt repo (fresh key -- no rotation issues)
+# ----------------------------------------------------------------------
+RUN curl -fsSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+        -o /usr/share/keyrings/ros-archive-keyring.gpg \
+ && . /etc/os-release \
+ && echo "deb [arch=arm64 signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $UBUNTU_CODENAME main" \
+        > /etc/apt/sources.list.d/ros2.list
+
+# ----------------------------------------------------------------------
+# Step 3: install ROS 2 Humble + all required ROS packages
+#
+# OpenCV-dependent packages (cv_bridge, image_pipeline, v4l2_camera)
+# install cleanly here because l4t-jetpack does NOT ship a /usr/ OpenCV
+# that would collide with apt's libopencv-*-dev.
+#
+# To add apriltag_ros for extrinsic calibration:
+#   ros-humble-apriltag ros-humble-apriltag-msgs ros-humble-apriltag-ros
+# (left out of the default install to keep the image smaller.)
+# ----------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-humble-ros-base \
+        ros-humble-cv-bridge \
         ros-humble-image-common \
+        ros-humble-image-transport \
+        ros-humble-image-transport-plugins \
+        ros-humble-image-pipeline \
         ros-humble-camera-info-manager \
+        ros-humble-v4l2-camera \
+        ros-humble-vision-msgs \
         ros-humble-tf2-ros \
         ros-humble-tf2-geometry-msgs \
         ros-humble-foxglove-bridge \
         ros-humble-launch-testing-ament-cmake \
         ros-humble-rmw-fastrtps-cpp \
+        python3-pip \
+        python3-colcon-common-extensions \
+        python3-rosdep \
+        python3-vcstool \
         libapriltag-dev \
+        # libopenblas0: torch from Jetson AI Lab cu126 dlopens
+        # libopenblas.so.0 at import time; l4t-jetpack does not ship it.
+        libopenblas0 \
         qv4l2 \
         v4l-utils \
         usbutils \
         git \
         build-essential \
         cmake \
-        less vim ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /ros_ws
-ENV YOLO_CONFIG_DIR=/ros_ws
-
-# ======================================================================
-#                  COMMENTED-OUT STEPS BELOW
-# ======================================================================
-# Uncomment one block at a time, validate inside a running container,
-# then rebuild. The "STATUS" tags reflect what we've seen so far.
-# ======================================================================
-
-# ----------------------------------------------------------------------
-# Step 3: CUDA torch + torchvision from Jetson AI Lab mirror
-# [STATUS: verified working]
-#
-# Three gotchas baked in here:
-#   1. dustynv r36.* images set PIP_INDEX_URL/PIP_TRUSTED_HOST as ENV
-#      vars pointing at http://jetson.webredirect.org/jp6/cu122, a host
-#      that no longer resolves. ENV-var settings outrank pip.conf, so
-#      we clear them at the top of this Dockerfile (see the ENV block).
-#   2. We also rm /etc/pip.conf et al. as defense-in-depth -- not every
-#      dustynv variant uses env vars, some use files.
-#   3. Use `--index-url` (replaces primary), NOT `--extra-index-url`
-#      (which would still leave the dead host in the list if some other
-#      layer reintroduces it). Then add PyPI as the extra-index so
-#      ultralytics' non-CUDA Python deps still resolve.
-# ----------------------------------------------------------------------
-# CUDA-toolchain version on the Jetson AI Lab mirror must match the
-# cuDNN that ships with the BASE_IMAGE's L4T tag:
-#   r36.2.0 / r36.3.0 (JetPack 6.0)     -> jp6/cu122 (cuDNN 8)
-#   r36.4.0          (JetPack 6.1/6.2)  -> jp6/cu126 (cuDNN 9)
-#   r35.*            (JetPack 5.1.x)    -> jp5/cu114 (cuDNN 8.6)
-# A mismatch (e.g. cu126 wheel on a cu122 base) fails at import time
-# with "libcudnn.so.9: cannot open shared object file".
-ARG PYPI_INDEX_URL="https://pypi.jetson-ai-lab.io/jp6/cu122"
-ARG PIP_OPTS="--retries 10 --timeout 120"
-RUN rm -f /etc/pip.conf /etc/pip3.conf /root/.pip/pip.conf /root/.config/pip/pip.conf \
- && pip3 install $PIP_OPTS \
-        --index-url "$PYPI_INDEX_URL" \
-        --extra-index-url https://pypi.org/simple \
-        torch torchvision
-
-# ----------------------------------------------------------------------
-# Step 4: source-build OpenCV-dependent ROS packages
-# vision_opencv (cv_bridge), image_pipeline (image_proc), and
-# ros2_v4l2_camera link against dustynv's pre-installed OpenCV in /usr/.
-# We can't apt-install ros-humble-cv-bridge & friends because they pull
-# in libopencv-*-dev which dpkg-overwrite-collides with dustynv's
-# OpenCV. apriltag_ros is gated off by default because of an unresolved
-# linker error on dustynv L4T -- flip BUILD_APRILTAG_ROS=1 to attempt
-# it (only needed for extrinsic calibration).
-# ----------------------------------------------------------------------
-ARG BUILD_APRILTAG_ROS=0
-WORKDIR /opt/ros_overlay/src
-RUN git clone --depth=1 -b humble https://github.com/ros-perception/vision_opencv.git \
- && git clone --depth=1 -b humble https://github.com/ros-perception/image_pipeline.git \
- && git clone --depth=1 -b humble https://gitlab.com/boldhearts/ros2_v4l2_camera.git \
- && if [ "$BUILD_APRILTAG_ROS" = "1" ]; then \
-        git clone --depth=1 -b 2.0.1 https://github.com/christianrauch/apriltag_msgs.git \
-     && git clone --depth=1 -b 3.2.1 https://github.com/christianrauch/apriltag_ros.git ; \
-    fi
-
-RUN apt-get update \
- && (rosdep init 2>/dev/null || true) \
- && rosdep update --rosdistro humble \
- && rosdep install -y --from-paths /opt/ros_overlay/src --ignore-src \
-        --rosdistro humble \
-        --skip-keys "libopencv-dev libopencv-core-dev libopencv-imgproc-dev \
-            libopencv-imgcodecs-dev libopencv-videoio-dev libopencv-highgui-dev \
-            libopencv-ml-dev libopencv-features2d-dev libopencv-calib3d-dev \
-            libopencv-flann-dev libopencv-dnn-dev libopencv-objdetect-dev \
-            libopencv-photo-dev libopencv-video-dev libopencv-shape-dev \
-            libopencv-stitching-dev libopencv-superres-dev libopencv-videostab-dev \
-            libopencv-contrib-dev python3-opencv \
-            camera_ros libcamera" \
+        less vim \
  && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /opt/ros_overlay
-RUN if [ -f /opt/ros/humble/install/setup.sh ]; then \
-        . /opt/ros/humble/install/setup.sh ; \
-    else \
-        . /opt/ros/humble/setup.sh ; \
-    fi \
- && colcon build --merge-install \
-        --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+# Initialise rosdep so users dropping into the container can resolve
+# dependencies for any extra source packages they want to build.
+RUN (rosdep init 2>/dev/null || true) && rosdep update --rosdistro humble
+
+WORKDIR /ros_ws
+
+# ----------------------------------------------------------------------
+# Step 4: CUDA torch + torchvision from the Jetson AI Lab mirror
+#
+# cuXXX must match the base image's cuDNN major:
+#   r36.4.x  (cuDNN 9)  -> jp6/cu126
+#   r36.2-3  (cuDNN 8)  -> jp6/cu122
+#   r35.*    (cuDNN 8)  -> jp5/cu114
+#
+# Two gotchas baked in:
+#   1. PyPI now hosts manylinux_2_28 aarch64 torch wheels built for
+#      CUDA 13.0 (suffix +cu130). pip's resolver compares versions
+#      across indexes, so a plain `--extra-index-url pypi.org` would
+#      pull PyPI's same-versioned wheel over Jetson AI Lab's. The cu130
+#      wheel then fails at runtime on cu126 drivers with
+#      "The NVIDIA driver on your system is too old (found version 12060)".
+#      Fix: install torch/torchvision against Jetson AI Lab ONLY
+#      (--index-url, no extra), and use --no-deps so pip doesn't try to
+#      resolve torch's pure-Python deps against the limited Jet-AI-Lab
+#      bucket (which only carries Jetson-specific wheels).
+#   2. Pin to the highest matched pair the Jetson AI Lab cu126 bucket
+#      actually serves -- torch 2.11.0 + torchvision 0.26.0 (paired by
+#      the upstream torch/torchvision release matrix). To bump, list
+#      the bucket and pick the highest matched pair, update both pins:
+#        curl -s https://pypi.jetson-ai-lab.io/jp6/cu126/+simple/torch/
+#        curl -s https://pypi.jetson-ai-lab.io/jp6/cu126/+simple/torchvision/
+# ----------------------------------------------------------------------
+ARG PYPI_INDEX_URL="https://pypi.jetson-ai-lab.io/jp6/cu126"
+# torch >=2.10 pulls in libcudss.so.0 (cuDSS) as a runtime dep, which
+# JetPack 6.2 (the host) does not ship -- import torch then fails with
+# "libcudss.so.0: cannot open shared object file". 2.8.0 is the
+# pre-cuDSS line on the cu126 bucket and is ultralytics-supported.
+ARG TORCH_VERSION=2.8.0
+ARG TORCHVISION_VERSION=0.23.0
+ARG PIP_OPTS="--retries 10 --timeout 120"
+RUN pip3 install $PIP_OPTS \
+        --index-url "$PYPI_INDEX_URL" \
+        --no-deps \
+        "torch==${TORCH_VERSION}" \
+        "torchvision==${TORCHVISION_VERSION}" \
+ && pip3 install $PIP_OPTS \
+        filelock typing-extensions "sympy>=1.13.3" networkx jinja2 fsspec pillow
 
 # ----------------------------------------------------------------------
 # Step 5: ultralytics + non-torch python deps
-# ultralytics is installed with --no-deps so pip doesn't replace the
-# CUDA torch wheel from Step 3 with a PyPI CPU-only one. We then layer
-# in ultralytics' non-torch runtime deps explicitly. numpy is pinned to
-# <2 to keep cv_bridge's NumPy 1.x C ABI loadable. opencv-python is
-# intentionally NOT installed -- dustynv's pre-installed cv2 already
-# provides Python bindings (with CUDA), and a pip wheel would shadow
-# them with a CPU-only build.
+#
+# --no-deps so pip doesn't replace the CUDA torch wheel from Step 4 with
+# a PyPI CPU-only one. Then layer in ultralytics' non-torch runtime deps
+# explicitly. numpy is pinned <2 to keep cv_bridge's NumPy 1.x C ABI
+# loadable. opencv-python is intentionally NOT installed -- ros-humble-cv-bridge
+# pulled in python3-opencv via apt, and a pip wheel would shadow it
+# with a CPU-only build.
 # ----------------------------------------------------------------------
 RUN pip3 install $PIP_OPTS --no-deps ultralytics \
  && pip3 install $PIP_OPTS \
-        numpy pyyaml requests tqdm psutil py-cpuinfo matplotlib pandas seaborn
+        "numpy<2" pyyaml requests tqdm psutil py-cpuinfo matplotlib pandas seaborn
 
 # ----------------------------------------------------------------------
 # Step 6: pre-fetch YOLOv8 weights so first run is offline-safe
@@ -188,9 +174,8 @@ RUN pip3 install $PIP_OPTS --no-deps ultralytics \
 RUN python3 -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
 
 # ----------------------------------------------------------------------
-# Sanity-check imports at build time so we fail fast if a layer broke
-# torch/cv2/numpy. CUDA availability check is deferred to runtime --
-# the build doesn't have --runtime nvidia.
+# Sanity-check imports at build time so a broken layer fails fast.
+# CUDA availability is deferred to runtime (build has no --runtime nvidia).
 # ----------------------------------------------------------------------
 RUN python3 -c "import torch; print(f'torch {torch.__version__}')" \
  && python3 -c "import cv2;   print(f'cv2   {cv2.__version__}')" \

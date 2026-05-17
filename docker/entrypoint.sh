@@ -1,19 +1,14 @@
 #!/usr/bin/env bash
 set -e
 
-# osrf's ros:humble-* (CPU build) places setup.bash at /opt/ros/humble/.
-# dustynv's L4T images (Jetson build) build ROS from source and place it
-# at /opt/ros/humble/install/setup.bash. Source whichever exists.
+# ROS Humble lives at /opt/ros/humble/setup.bash whether installed via
+# apt (current Jetson + CPU builds) or built from source (older dustynv
+# L4T images placed it under /opt/ros/humble/install/). Source whichever
+# exists so the entrypoint works across base-image variants.
 if [ -f /opt/ros/humble/setup.bash ]; then
     source /opt/ros/humble/setup.bash
 elif [ -f /opt/ros/humble/install/setup.bash ]; then
     source /opt/ros/humble/install/setup.bash
-fi
-# Jetson overlay: cv_bridge, image_pipeline, v4l2_camera, apriltag_ros
-# source-built against dustynv's OpenCV. Absent on the CPU build, so
-# this is conditional.
-if [ -f /opt/ros_overlay/install/setup.bash ]; then
-    source /opt/ros_overlay/install/setup.bash
 fi
 # App workspace: only present once the app's colcon build has run.
 # In the simplified Jetson Dockerfile the colcon step is commented out

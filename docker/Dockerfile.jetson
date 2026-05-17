@@ -21,16 +21,12 @@ COPY launch       ./launch
 COPY config       ./config
 
 # ----------------------------------------------------------------------
-# colcon build: source dustynv's ROS first, then the /opt/ros_overlay
-# built in the base image (cv_bridge etc.), then build the app package.
+# colcon build: source ROS Humble (apt-installed in the base image) and
+# build the app package. cv_bridge / image_pipeline / v4l2_camera are
+# now apt-installed in the base, so no overlay is needed.
 # ----------------------------------------------------------------------
 WORKDIR /ros_ws
-RUN if [ -f /opt/ros/humble/install/setup.sh ]; then \
-        . /opt/ros/humble/install/setup.sh ; \
-    else \
-        . /opt/ros/humble/setup.sh ; \
-    fi \
- && . /opt/ros_overlay/install/setup.sh \
+RUN . /opt/ros/humble/setup.sh \
  && colcon build --packages-select ros2_vlm_vision --symlink-install
 
 # ---- Helper scripts + entrypoint (frequent edits) ---------------------

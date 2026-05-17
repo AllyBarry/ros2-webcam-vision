@@ -15,20 +15,26 @@
 #   # e.g. "# R36 (release), REVISION: 4.0" -> tag is r36.4.0
 #
 # Pick BASE_IMAGE + PYPI_INDEX_URL for your JetPack and export them
-# before running compose (or edit the defaults under the `base` service):
+# before running compose (or edit the defaults under the `base` service).
+# Defaults below target JetPack 6.1/6.2 (L4T r36.4.x, CUDA 12.6, cuDNN 9);
+# only export overrides if your JetPack differs.
 #
-#   JetPack 6.x (L4T r36.*) -- no combined ros+pytorch image exists, so
-#   use a ros-base ROS image and pull torch from the Jetson AI Lab
-#   mirror. Pick ros-base over desktop: the desktop variant ships an
-#   OpenCV in /usr/ that collides with apt's libopencv-*-dev (dpkg
-#   "trying to overwrite"):
-#     export BASE_IMAGE=dustynv/ros:humble-ros-base-l4t-r36.3.0
-#     export PYPI_INDEX_URL=https://pypi.jetson-ai-lab.io/jp6/cu126
+# The base is the official NVIDIA l4t-jetpack image (CUDA + cuDNN + TRT
+# baked in). ROS Humble is apt-installed on top inside Dockerfile.base.jetson.
+# cuXXX in PYPI_INDEX_URL must match the base image's cuDNN major (mismatch
+# fails at runtime with "libcudnn.so.X: cannot open shared object file").
 #
-#   JetPack 5.1.x (L4T r35.*) -- combined image already has torch, leave
-#   PYPI_INDEX_URL empty:
-#     export BASE_IMAGE=dustynv/ros:humble-pytorch-l4t-r35.4.1
-#     export PYPI_INDEX_URL=
+#   # JetPack 6.1 / 6.2 (cuDNN 9) -- DEFAULT
+#   export BASE_IMAGE=nvcr.io/nvidia/l4t-jetpack:r36.4.0
+#   export PYPI_INDEX_URL=https://pypi.jetson-ai-lab.io/jp6/cu126
+#
+#   # JetPack 6.0 (cuDNN 8)
+#   export BASE_IMAGE=nvcr.io/nvidia/l4t-jetpack:r36.3.0
+#   export PYPI_INDEX_URL=https://pypi.jetson-ai-lab.io/jp6/cu122
+#
+#   # JetPack 5.1.x (cuDNN 8)
+#   export BASE_IMAGE=nvcr.io/nvidia/l4t-jetpack:r35.4.1
+#   export PYPI_INDEX_URL=https://pypi.jetson-ai-lab.io/jp5/cu114
 #
 # GUI services (`tune`) need access to the host's X server. Two cases:
 #
@@ -73,21 +79,27 @@ x-vlm-base: &vlm_base
   environment:
     ROS_DOMAIN_ID: "0"
     RMW_IMPLEMENTATION: rmw_fastrtps_cpp
-    # Default capture device. Override via env (`CAMERA_DEVICE=/dev/video1
-    # docker compose ... run --rm <service>`) if your webcam is on a
-    # different /dev/videoN.
-    CAMERA_DEVICE: ${CAMERA_DEVICE:-/dev/video0}
+    # Capture device. Left empty so the per-service shell wrappers can
+    # auto-resolve via /dev/v4l/by-id/usb-*${DEVICE_NAME_MATCH}*-video-index0
+    # (a stable per-camera symlink that survives /dev/videoN renumbering
+    # across replug). Override either knob explicitly when needed:
+    #   CAMERA_DEVICE=/dev/videoN     docker compose ... run --rm <svc>
+    #   DEVICE_NAME_MATCH=C920        docker compose ... run --rm <svc>
+    # The `vlm` service's launch file does its own by-id resolution
+    # (video_device:=auto, device_name_match:=BRIO) and ignores
+    # CAMERA_DEVICE; the env var matters only for `tune` and
+    # `save-settings` which call v4l2 tools directly.
+    CAMERA_DEVICE: ${CAMERA_DEVICE:-}
+    DEVICE_NAME_MATCH: ${DEVICE_NAME_MATCH:-BRIO}
     # Make all visible GPUs available; on Jetson this is the integrated
     # iGPU, but the env var is what the nvidia runtime keys off.
     NVIDIA_VISIBLE_DEVICES: all
     NVIDIA_DRIVER_CAPABILITIES: all
 
 services:
-  # Heavy base image (ROS + apt + torch (for r36) + ultralytics + YOLO
-  # weights + numpy check). The L4T base provides CUDA/cuDNN/TensorRT;
-  # torch comes pre-installed on r35 humble-pytorch-l4t-* images and is
-  # pip-installed from the Jetson AI Lab mirror on r36.
-  # Build once with:
+  # Heavy base image: l4t-jetpack (CUDA/cuDNN/TRT) + apt-installed ROS
+  # Humble + Jetson AI Lab torch + ultralytics + YOLO weights. Build
+  # once with:
   #   docker compose -f docker-compose.jetson.yml --profile build build base
   # See top-of-file comments for BASE_IMAGE / PYPI_INDEX_URL options.
   base:
@@ -96,14 +108,11 @@ services:
       context: .
       dockerfile: docker/Dockerfile.base.jetson
       args:
-        BASE_IMAGE: ${BASE_IMAGE:-dustynv/ros:humble-ros-base-l4t-r36.3.0}
-        # cuXXX must match BASE_IMAGE's L4T cuDNN. Default cu122 pairs
-        # with r36.3.0 (JP 6.0, cuDNN 8). Use cu126 for r36.4.0 (JP 6.1+).
-        PYPI_INDEX_URL: ${PYPI_INDEX_URL:-https://pypi.jetson-ai-lab.io/jp6/cu122}
-        # apriltag_ros has been brittle to build on L4T. Default off;
-        # set BUILD_APRILTAG_ROS=1 to attempt it (extrinsic calibration
-        # only).
-        BUILD_APRILTAG_ROS: ${BUILD_APRILTAG_ROS:-0}
+        BASE_IMAGE: ${BASE_IMAGE:-nvcr.io/nvidia/l4t-jetpack:r36.4.0}
+        # cuXXX must match BASE_IMAGE's CUDA/cuDNN. Default cu126 pairs
+        # with r36.4.x (JP 6.1/6.2, cuDNN 9). Use cu122 for r36.2.0/r36.3.0
+        # (JP 6.0, cuDNN 8) or jp5/cu114 for r35.* (JP 5.1.x).
+        PYPI_INDEX_URL: ${PYPI_INDEX_URL:-https://pypi.jetson-ai-lab.io/jp6/cu126}
     image: ros2_vlm_vision-base-jetson:latest
     command: ["true"]
 
@@ -135,19 +144,36 @@ services:
     environment:
       ROS_DOMAIN_ID: "0"
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
-      CAMERA_DEVICE: ${CAMERA_DEVICE:-/dev/video0}
+      CAMERA_DEVICE: ${CAMERA_DEVICE:-}
+      DEVICE_NAME_MATCH: ${DEVICE_NAME_MATCH:-BRIO}
       DISPLAY: ${DISPLAY:-:0}
       XAUTHORITY: /tmp/.docker.xauth
       QT_X11_NO_MITSHM: "1"
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: all
+      LD_LIBRARY_PATH: /usr/local/cuda/lib64:/usr/lib/aarch64-linux-gnu/nvidia:/usr/local/lib/python3.10/dist-packages/nvidia/cudnn/lib
     volumes:
+      - /usr/local/cuda:/usr/local/cuda:ro
+      - /usr/lib/aarch64-linux-gnu/nvidia:/usr/lib/aarch64-linux-gnu/nvidia:ro
       - /dev:/dev
       - ./camera_info:/root/.ros/camera_info
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ${XAUTH:-/tmp/.docker.xauth}:/tmp/.docker.xauth:ro
     entrypoint: ["/entrypoint.sh"]
-    command: ["qv4l2", "-d", "${CAMERA_DEVICE:-/dev/video0}"]
+    # Auto-resolve the camera node via /dev/v4l/by-id/ (stable per-camera
+    # symlinks). CAMERA_DEVICE env wins if explicitly set; otherwise we
+    # readlink the symlink matching DEVICE_NAME_MATCH; final fallback is
+    # /dev/video0 so the error message is the recognisable "No such file".
+    # The `$$` is compose's escape for a literal `$` in the YAML --
+    # the shell-time evaluation happens inside the container.
+    command:
+      - sh
+      - -c
+      - |
+        DEV="$${CAMERA_DEVICE:-$$(readlink -f /dev/v4l/by-id/usb-*$${DEVICE_NAME_MATCH}*-video-index0 2>/dev/null | head -1)}"
+        DEV="$${DEV:-/dev/video0}"
+        echo "[tune] camera device: $$DEV"
+        exec qv4l2 -d "$$DEV"
     restart: "no"
 
   # Dumps the live v4l2 control state back to camera_info/v4l2_params.yaml
@@ -157,7 +183,16 @@ services:
     profiles: ["tune"]
     container_name: vlm_save_settings
     entrypoint: ["/entrypoint.sh"]
-    command: ["/usr/local/bin/save_camera_settings.sh"]
+    # Same by-id auto-resolution as the `tune` service; the resolved
+    # path is passed as $1 to save_camera_settings.sh.
+    command:
+      - sh
+      - -c
+      - |
+        DEV="$${CAMERA_DEVICE:-$$(readlink -f /dev/v4l/by-id/usb-*$${DEVICE_NAME_MATCH}*-video-index0 2>/dev/null | head -1)}"
+        DEV="$${DEV:-/dev/video0}"
+        echo "[save-settings] camera device: $$DEV"
+        exec /usr/local/bin/save_camera_settings.sh "$$DEV"
     networks: [ros]
     restart: "no"
 
