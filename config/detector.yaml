@@ -13,3 +13,32 @@ vlm_detector_node:
     initial_target_classes: ""
     # Draw non-target detections faded in the debug image (false = hide).
     show_non_targets: true
+
+    # ---- World-frame back-projection ---------------------------------
+    # When use_table_plane is true AND a static world->camera TF is
+    # available (load via extrinsics_publisher / publish via the
+    # apriltag_extrinsic_latcher), each detection's bottom-of-bbox
+    # pixel is ray-cast against the world-frame plane z = table_z_world
+    # to recover (X, Y) directly on the table -- accurate to mm at
+    # the pick location, independent of the size heuristic. The
+    # centroid is then lifted to z = table_z_world + height/2 using
+    # the per-class height from dimensions_path.
+    #
+    # Falls back to the legacy depth-from-height heuristic (in the
+    # camera frame) when the TF isn't available, so the pipeline
+    # still works before extrinsic calibration is done.
+    world_frame: world
+    use_table_plane: true
+    # Height of the table surface in the world frame, in metres. With
+    # the apriltag latcher placing the anchor tag flat on the table,
+    # 0.0 is correct.
+    table_z_world: 0.0
+    # Which pixel inside the bbox is treated as the table-contact point:
+    # 'bottom_center' (u_mid, y2) -- safe default for any object on the
+    #   table; the lowest pixel of the silhouette images the contact.
+    # 'center' (u_mid, v_mid) -- only correct if table_z_world is set
+    #   to the centroid height for a known-flat scene.
+    contact_point: bottom_center
+    # Path to per-class dimensions YAML. Empty = use the bundled file
+    # at share/ros2_vlm_vision/config/object_dimensions.yaml.
+    dimensions_path: ""

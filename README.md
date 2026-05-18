@@ -24,28 +24,48 @@ in-browser visualisation.
 - [Quick start (Docker, Windows / WSL2)](#quick-start-docker-windows--wsl2)
 - [Quick start (Docker, Jetson)](#quick-start-docker-jetson)
 - [Native build (Ubuntu 22.04 + ROS 2 Humble)](#native-build-ubuntu-2204--ros-2-humble)
+- [AprilTag world tracking](#apriltag-world-tracking)
 - [Selecting target objects](#selecting-target-objects)
 - [Camera settings (focus, exposure, white balance)](#camera-settings-focus-exposure-white-balance)
 - [Calibration](#calibration)
-- [Customising the size table](#customising-the-size-table)
+- [Per-class dimensions for picking-grade 3D output](#per-class-dimensions-for-picking-grade-3d-output)
 - [Parameters](#parameters)
 - [Troubleshooting](#troubleshooting)
 
 ## Pipeline
 
 ```
-Logitech UVC webcam ──► v4l2_camera (io_method=read, MJPG)
+Logitech UVC webcam ──► v4l2_camera (io_method=read, YUYV)
                             │
                             ├─ /image_raw       (sensor_msgs/Image)
                             └─ /camera_info     (sensor_msgs/CameraInfo)
                                        │
                                        ▼
-                            vlm_detector_node  (YOLOv8 + size heuristic)
+                            vlm_detector_node  (YOLOv8 + size heuristic
+                                                OR ray-plane projection
+                                                if extrinsics loaded)
                                        │
               ┌────────────────────────┼────────────────────────────┐
               ▼                        ▼                            ▼
    ~/detections              ~/markers                    ~/debug_image
-   (Detection3DArray)        (MarkerArray)                (annotated BGR)
+   (Detection3DArray         (MarkerArray                 (annotated BGR)
+    frame_id=world or         cubes sized from
+    camera, see below)        per-class YAML)
+
+Optional, apriltag:=true:
+
+  /image_raw ──► rectify_node ──► apriltag_node ──┐
+                                                  ├── /detections  (apriltag_msgs)
+                                                  └── /tf  camera→tag36h11:<id>
+
+  extrinsics.yaml ──► extrinsics_publisher ──── /tf static  world→camera
+
+                              ↓ tf2 composition
+                  apriltag_world_publisher
+                              │
+                  /apriltag_world_publisher/world_detections (Detection3DArray)
+                  /apriltag_world_publisher/world_poses      (PoseArray)
+                  /apriltag_world_publisher/markers          (MarkerArray)
 ```
 
 The capture node is resolved at launch time. By default (`video_device:=auto`)
@@ -53,11 +73,23 @@ the launch picks a stable per-device symlink from `/dev/v4l/by-id/` matching
 the `device_name_match` substring (default `BRIO`), so `/dev/videoN`
 renumbering across replug / usbipd reattach is handled automatically.
 
-Distance is computed per detection as `Z = real_h_m * fy / bbox_h_px`,
-where `real_h_m` comes from [`utils/object_sizes.py`](ros2_vlm_vision/utils/object_sizes.py)
-and `fy` from `camera_info`. The bbox centre is then back-projected:
-`X = (u - cx) * Z / fx`, `Y = (v - cy) * Z / fy`. Detections whose class is
-not in the size table are dropped from the 3D output (logged once).
+Two depth-estimation paths, picked per-frame based on what's available:
+
+- **World-frame ray-plane projection** (active when the static
+  `world → camera` TF is loaded). Each detection's bottom-bbox pixel is
+  ray-cast onto the world-frame table plane `z = table_z_world`,
+  yielding world (X, Y) at the contact point. The centroid Z is lifted
+  by `height / 2` using the per-class height from
+  [`config/object_dimensions.yaml`](config/object_dimensions.yaml).
+  `BoundingBox3D.size` is filled with real metres from the YAML.
+- **Size heuristic fallback** (when no extrinsic TF is available).
+  `Z = real_h_m * fy / bbox_h_px` with `real_h_m` from the same YAML's
+  `height` field; bbox centre back-projects to camera-frame XY via
+  the standard pinhole relation. Less accurate (intra-class size
+  variance, atypical pose) but always available.
+
+See [Per-class dimensions for picking-grade 3D output](#per-class-dimensions-for-picking-grade-3d-output)
+for which fields the YAML uses and how the two modes interact.
 
 ## Topics
 
@@ -70,6 +102,18 @@ Published:
 | `/vlm_detector_node/debug_image`       | `sensor_msgs/Image`               | Annotated frame with header overlay (lazy — needs a sub)  |
 | `/vlm_detector_node/active_targets`    | `std_msgs/String`                 | Latched: current filter, empty string = no filter         |
 
+Published when launched with `apriltag:=true` (see [AprilTag world tracking](#apriltag-world-tracking)):
+
+| Topic                                          | Type                              | Notes                                                     |
+|-----------------------------------------------|-----------------------------------|-----------------------------------------------------------|
+| `/detections`                                  | `apriltag_msgs/AprilTagDetectionArray` | From `apriltag_node`, frame_id=camera                |
+| `/image_rect`                                  | `sensor_msgs/Image`               | Rectified frame consumed by `apriltag_node`               |
+| `/tf` (static)  `world → camera`               | from `extrinsics_publisher` (loads `extrinsics.yaml`)                        |
+| `/tf` (live)    `camera → tag36h11:<id>`       | from `apriltag_node` per detected tag                                        |
+| `/apriltag_world_publisher/world_detections`   | `vision_msgs/Detection3DArray`    | Tag poses in **world** frame; class_id="tag36h11:<id>"    |
+| `/apriltag_world_publisher/world_poses`        | `geometry_msgs/PoseArray`         | Pose-only view, world frame                               |
+| `/apriltag_world_publisher/markers`            | `visualization_msgs/MarkerArray`  | Cube + label per tag for Foxglove                         |
+
 Subscribed:
 
 | Topic                                  | Type                              | Notes                                                     |
@@ -78,8 +122,14 @@ Subscribed:
 | `/camera_info`                         | `sensor_msgs/CameraInfo`          | Used for `fx, fy, cx, cy` + frame_id                      |
 | `/vlm_detector_node/target_classes`    | `std_msgs/String`                 | Latched filter input — see [Selecting target objects](#selecting-target-objects) |
 
-Header `frame_id` defaults to `camera` (overridable via the `camera_frame`
-parameter or by `camera_info.header.frame_id`).
+**Detection frame depends on calibration state.** When the static
+`world → camera` TF is available (from `extrinsics_publisher` loading
+`camera_info/extrinsics.yaml`) and `use_table_plane=true` (default), the
+detector projects each detection onto the world-frame table plane and
+publishes detections with `header.frame_id=world`. Without that TF, it
+falls back to the size-heuristic depth and publishes in `camera` frame.
+The topic shape is identical either way — only `frame_id` and accuracy
+differ. See [Per-class dimensions for picking-grade 3D output](#per-class-dimensions-for-picking-grade-3d-output).
 
 ## Quick start (Docker, Windows / WSL2)
 
@@ -197,11 +247,43 @@ docker compose -f docker-compose.jetson.yml --profile build build base
 
 # Subsequent: fast app build (~5 s) -- just colcon + COPYs on top.
 docker compose -f docker-compose.jetson.yml build vlm
+
+# Bring up the vision stack -- wrapped in a script that sets the
+# right defaults for the imported calibration (1280x720, cuda:0,
+# apriltag tracking on). Extra args pass through:
+#   scripts/bringup.sh                          # defaults
+#   scripts/bringup.sh image_width:=640 image_height:=360
+#   scripts/bringup.sh apriltag:=false io_method:=mmap
+#   scripts/bringup.sh device:=cpu
+scripts/bringup.sh
+
+# Or directly:
 docker compose -f docker-compose.jetson.yml up vlm
 
 # In-browser visualisation (foxglove_bridge on :8765):
 docker compose -f docker-compose.jetson.yml --profile viz up
 ```
+
+**Importing a precomputed calibration.** If you already have intrinsics
++ extrinsics from another workspace (e.g. a `cv2.calibrateCamera` /
+hand-eye flow that produced `intrinsics.yaml` and `T_world_camera.yaml`),
+the importer converts them into ROS `CameraInfo` and copies them into
+this repo's `camera_info/`:
+
+```bash
+# Default source: /home/jetson/ros2_ws
+scripts/import_ros2_ws_calibration.sh
+
+# Or point at a different workspace
+scripts/import_ros2_ws_calibration.sh /path/to/source_ws
+```
+
+The script writes `camera_info/camera.yaml` (intrinsics, in ROS
+`CameraInfo` format) and `camera_info/extrinsics.yaml` (extrinsic
+transform; `extrinsics_publisher` auto-detects the schema — see
+[Calibration](#calibration)). Re-run after each fresh calibration in
+the source workspace. The script's final line prints the matching
+launch invocation for your calibration's resolution.
 
 **Sanity-check GPU access** through the container runtime:
 
@@ -210,6 +292,32 @@ docker compose -f docker-compose.jetson.yml run --rm --entrypoint python3 vlm \
     -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 # expect: True Orin
 ```
+
+**GUI apps from a remote PC (qv4l2 tuning, rviz2, etc.).** Per-SSH-login
+setup: the X11 forwarded DISPLAY changes every login, so the container
+needs a fresh xauth cookie each time. Source the helper:
+
+```bash
+source scripts/prepare_gui_session.sh
+```
+
+It auto-detects SSH-X11 vs local-desktop and exports `XAUTH` for the
+`tune` service. Then:
+
+```bash
+docker compose -f docker-compose.jetson.yml --profile tune run --rm tune
+```
+
+If `prepare_gui_session.sh` reports "no xauth entry" or the SSH session
+hasn't forwarded X11, re-SSH with `-Y` (and ensure your jump host
+allows it):
+
+```bash
+ssh -Y -J user@jumphost user@jetson
+```
+
+Verify forwarding with `xeyes` before sourcing the helper — if `xeyes`
+doesn't pop on your local PC, the SSH side isn't carrying X11 yet.
 
 **Foxglove access from a remote PC.** When you're SSH'd into the Jetson
 (directly, or through a jump host / bastion), the Foxglove WebSocket is
@@ -280,6 +388,55 @@ ros2 launch ros2_vlm_vision vision_stack.launch.py \
 ```
 
 If `v4l2_camera` is already running elsewhere, pass `launch_camera:=false`.
+
+## AprilTag world tracking
+
+Once extrinsic calibration has been run (i.e. `camera_info/extrinsics.yaml`
+exists), the vision stack can continuously detect AprilTags in the live
+stream and republish their poses in the **world** frame — useful for
+verifying calibration, tracking tagged trays / fixtures / robot
+end-effectors, or providing ground-truth pick anchors. Off by default;
+opt in per-launch:
+
+```bash
+# Native:
+ros2 launch ros2_vlm_vision vision_stack.launch.py apriltag:=true
+
+# In Docker compose (override the service's default CMD):
+docker compose -f docker-compose.jetson.yml run --rm vlm \
+    ros2 launch ros2_vlm_vision vision_stack.launch.py device:=cuda:0 apriltag:=true
+```
+
+What gets wired up when `apriltag:=true`:
+
+1. `image_proc/rectify_node` consumes `/image_raw` + `/camera_info`, publishes `/image_rect`.
+2. `apriltag_ros/apriltag_node` consumes `/image_rect` + `/camera_info`, publishes:
+   - `/detections` (apriltag_msgs/AprilTagDetectionArray) — per-detection corner pixels.
+   - One TF per detected tag: `camera -> tag36h11:<id>` (live, PnP-derived).
+3. `extrinsics_publisher` reads `extrinsics.yaml` (written by the latcher) and broadcasts the static `world -> camera` TF.
+4. `apriltag_world_publisher` listens on `/detections`, composes `world -> camera -> tag` via tf2, and publishes the result on the three topics in the table above.
+
+The world-frame detection topic is intentionally shaped like the YOLO
+detector's (`vision_msgs/Detection3DArray` with `class_id` and `pose`),
+so a downstream picker can treat both sources uniformly: subscribe to
+both, dedupe by class, send the chosen 3D pose to the robot.
+
+**Tag family & size** are configured in
+[config/apriltag.yaml](config/apriltag.yaml) — the defaults match the
+extrinsic calibration's anchor tag (36h11, 162 mm edge). To track
+multiple tag families simultaneously, edit the YAML to add families
+and update `apriltag_world_publisher`'s `tag_frame_prefix` parameter
+accordingly.
+
+**If you launch with `apriltag:=true` but `extrinsics.yaml` doesn't exist,**
+`extrinsics_publisher` exits non-zero and the rest of the AprilTag chain
+still runs but emits no world-frame topics (TF lookups fail). Re-run
+the extrinsic calibration first:
+
+```bash
+docker compose -f docker-compose.jetson.yml --profile calibrate run --rm calibrate \
+    ros2 launch ros2_vlm_vision calibration.launch.py mode:=extrinsic
+```
 
 ## Selecting target objects
 
@@ -366,6 +523,37 @@ GUI apps in the container work without setup:
 docker compose run --rm tune        # opens qv4l2 with live preview
 ```
 
+On Jetson, run the GUI session helper once per SSH login first to
+set up the XAUTH cookie:
+
+```bash
+source scripts/prepare_gui_session.sh
+docker compose -f docker-compose.jetson.yml --profile tune run --rm tune
+```
+
+qv4l2 over SSH X11 paints via Mesa's software GL (llvmpipe) — the
+`tune` service in `docker-compose.jetson.yml` already exports
+`LIBGL_ALWAYS_SOFTWARE=1`, `QT_OPENGL=software`, and
+`__GLX_VENDOR_LIBRARY_NAME=mesa` for this. Do **not** add
+`QT_XCB_GL_INTEGRATION=none` — that disables Qt's GL integration
+entirely and qv4l2 crashes with `Cannot create platform OpenGL
+context, neither GLX nor EGL are enabled`. The current compose
+defaults are the right combination.
+
+You can also skip the GUI entirely — set V4L2 controls headlessly via
+`v4l2-ctl` inside the container, then persist with `save_camera_settings.sh`:
+
+```bash
+docker compose -f docker-compose.jetson.yml --profile tune run --rm \
+    --entrypoint sh tune -c '
+        v4l2-ctl -d /dev/video1 --list-ctrls
+        v4l2-ctl -d /dev/video1 -c focus_automatic_continuous=0 -c focus_absolute=80
+        v4l2-ctl -d /dev/video1 -c auto_exposure=1 -c exposure_time_absolute=250
+        v4l2-ctl -d /dev/video1 -c white_balance_automatic=0 -c white_balance_temperature=4500
+        /usr/local/bin/save_camera_settings.sh /dev/video1
+    '
+```
+
 In qv4l2:
 
 1. **Controls** tab → disable every "auto" first (autofocus,
@@ -444,6 +632,31 @@ different one (e.g. `apriltag_extrinsic_latcher:anchor_tag_frame:=tag36h11:5`).
   `camera_T_world` for callers that need either direction without
   re-inverting.
 
+### Reusing a calibration produced elsewhere
+
+`extrinsics_publisher` accepts two YAML layouts so the same node loads
+either calibrations produced by this repo's `apriltag_extrinsic_latcher`
+or by external tools (e.g. `cv2.calibrateCamera` + wrist-tag PnP
+workflows like the one in `/home/jetson/ros2_ws`):
+
+- **Schema A** — nested `world_T_camera.{translation_xyz_m, rotation_xyzw}` block (what `apriltag_extrinsic_latcher` writes).
+- **Schema B** — top-level `translation_xyz` + `rotation_quat_xyzw` with `parent_frame` / `camera_frame` siblings (the `ros2_ws/calibrate.py` format).
+
+The auto-detection picks whichever is present and logs the schema used.
+To import an external calibration, the simplest path is
+[scripts/import_ros2_ws_calibration.sh](scripts/import_ros2_ws_calibration.sh):
+
+```bash
+scripts/import_ros2_ws_calibration.sh                       # default: /home/jetson/ros2_ws
+scripts/import_ros2_ws_calibration.sh /path/to/source_ws    # override
+```
+
+This converts the source `intrinsics.yaml` into ROS `CameraInfo` format
+at `camera_info/camera.yaml` and copies `T_world_camera.yaml` to
+`camera_info/extrinsics.yaml`. Re-run after each fresh calibration; the
+final line prints the exact launch invocation matching the calibration
+resolution.
+
 `vlm_detector_node` publishes its detections in `frame_id=camera`. With
 the static TF in place, any tf2 listener (or Foxglove's 3D panel set to
 `world` as the display frame) sees the detections in world coordinates
@@ -476,20 +689,58 @@ Recommended order on a fresh setup:
 3. `docker compose --profile calibrate run --rm calibrate` — produce intrinsics.
 4. `docker compose --profile viz up` — run the stack with both applied.
 
-## Customising the size table
+## Per-class dimensions for picking-grade 3D output
 
-The default table in
-[`ros2_vlm_vision/utils/object_sizes.py`](ros2_vlm_vision/utils/object_sizes.py)
-covers all 80 COCO classes with median upright heights. Two reasons to
-edit it:
+Once extrinsic calibration is loaded, the detector publishes detections
+in the **world frame** (`frame_id=world`). The 3D estimate uses **ray-
+plane back-projection against the calibrated table**, not the class-size
+heuristic — so the (X, Y) is geometry-driven and accurate to the
+extrinsic's RMSE at the pick location. The **per-class dimensions YAML**
+enhances this in three concrete ways:
 
-- **Domain-specific instances.** If you only see compact cars in your
-  testbed, lower `'car'` from 1.5 m to 1.4 m.
-- **Custom YOLO weights** with non-COCO classes. Add entries keyed by your
-  model's class names (matched against `result.names`).
+1. **Lifts the centroid above the table** by `height / 2`, so the pose's
+   Z is the object centroid (what most grasp planners want), not the
+   table contact point.
+2. **Populates `BoundingBox3D.size`** with real metres (width × depth ×
+   height) — MoveIt collision avoidance and any other consumer that
+   reads `vision_msgs/Detection3D` gets real dimensions, not pixel-
+   derived approximations.
+3. **Drives Foxglove markers as real-size CUBEs** at the correct world
+   pose, so what you see in the 3D panel is the actual occupied volume.
 
-Detections whose class is not in the table are dropped from the 3D output
-with a one-time warning per class.
+Dimensions live in
+[`config/object_dimensions.yaml`](config/object_dimensions.yaml). Edit
+to add custom classes (when using non-COCO YOLO weights) or to tune for
+your domain — e.g., if you only see baby carrots, drop `carrot.width`
+from 0.18 m to 0.07 m. Each entry:
+
+```yaml
+classes:
+  carrot:    { height: 0.025, width: 0.18, depth: 0.03, shape: cylinder }
+  apple:     { height: 0.075, width: 0.075, depth: 0.075, shape: sphere }
+  # ... height is required; width/depth/shape are optional.
+```
+
+Classes not in the YAML still get a world-frame pose via the
+`defaults` block; a once-per-class warning is logged so you know which
+entries to add. The `shape` field is informational at the moment —
+planners can use it to choose an approach strategy (top-pick for boxes,
+side-pinch for cylinders, etc.).
+
+**When extrinsic calibration *isn't* loaded** (no `world → camera` TF),
+the detector falls back to the legacy depth-from-height heuristic in
+the camera frame, using the same YAML's `height` values for `Z =
+real_h × fy / bbox_h_px`. Detections still publish; accuracy is just
+the pre-calibration class-size-heuristic level. Once you've run the
+extrinsic calibration and `extrinsics_publisher` is in the launch tree,
+the detector silently upgrades to the world-frame ray-plane path on
+the next frame.
+
+The `~/detections` topic's shape (`vision_msgs/Detection3DArray`) does
+not change between the two modes — only the `header.frame_id` (camera
+vs world) and the precision of the contents. Downstream code that
+subscribes can be written for either frame and just tf2-transform if
+needed.
 
 ## Parameters
 
@@ -507,6 +758,11 @@ Detector ([config/detector.yaml](config/detector.yaml)):
 | `camera_frame`    | `camera`       | Fallback frame_id if camera_info has none           |
 | `initial_target_classes` | `""`    | Startup filter; live overrides via `~/target_classes` |
 | `show_non_targets` | `true`        | Draw non-target detections faded in the debug image |
+| `use_table_plane`  | `true`        | When the static `world → camera` TF is loaded, project detections onto the world-frame table plane (ray-plane intersection). Falls back to size-heuristic in camera frame if TF unavailable. |
+| `table_z_world`    | `0.0`         | Height (m) of the table surface in the world frame. 0 is correct when the apriltag anchor is taped flat on the table during extrinsic calibration. |
+| `world_frame`      | `world`       | TF frame to transform detections into when `use_table_plane` is active. |
+| `contact_point`    | `bottom_center` | Pixel inside the bbox treated as the table contact: `bottom_center` `(u_mid, y2)` or `center` `(u_mid, v_mid)`. |
+| `dimensions_path`  | `""` (bundled) | Path to per-class dimensions YAML. Empty = use the file shipped with the package. |
 
 Camera-driver controls live in
 [camera_info/v4l2_params.yaml](camera_info/v4l2_params.yaml) and are loaded
@@ -518,9 +774,14 @@ Launch arguments (`vision_stack.launch.py --show-args` lists everything):
 |---------------------|------------------------------------------------------|------------------------------------------------------|
 | `video_device`      | `auto`                                               | `auto` resolves via `/dev/v4l/by-id/`; or pass a literal `/dev/videoN`. |
 | `device_name_match` | `BRIO`                                               | Substring matched against by-id entries when auto-resolving. Empty = first capture device. |
-| `image_width`       | `1280`                                               | Must match a mode the camera supports.               |
-| `image_height`      | `720`                                                |                                                      |
-| `pixel_format`      | `MJPG`                                               | `YUYV` is the fallback for cameras without MJPG.     |
+| `image_width`       | `640`                                                | Must match a mode the camera supports. **Use `1280` if your `camera_info/camera.yaml` was calibrated at 1280×720** (otherwise `rectify_node` rejects K as "uncalibrated"). |
+| `image_height`      | `480`                                                | See above for matched-resolution constraint. |
+| `pixel_format`      | `YUYV`                                               | Safe default — the apt-shipped `ros-humble-v4l2-camera` lacks MJPG decode. Cameras that only stream MJPG at high resolution will throttle to a few Hz under YUYV. |
+| `apriltag`          | `false`                                              | When `true`, runs `rectify_node` + `apriltag_node` + `extrinsics_publisher` + `apriltag_world_publisher` (see [AprilTag world tracking](#apriltag-world-tracking)). |
+| `extrinsics_yaml`   | `/root/.ros/camera_info/extrinsics.yaml`             | Used when `apriltag:=true`; consumed by `extrinsics_publisher` to broadcast `world → camera` static TF. |
+| `use_table_plane`   | `true`                                               | World-frame ray-plane projection vs. legacy size heuristic. See detector params table above. |
+| `table_z_world`     | `0.0`                                                | Table height in world frame, metres. |
+| `world_frame`       | `world`                                              | Output TF frame when table-plane projection is active. |
 | `io_method`         | `read`                                               | `read \| mmap \| userptr` — `read` is most portable. |
 | `camera_info_url`   | `file:///root/.ros/camera_info/camera.yaml`          | Intrinsic YAML; auto-loaded if present.              |
 | `launch_camera`     | `true`                                               | Set `false` if `v4l2_camera` is running externally.  |
@@ -558,9 +819,11 @@ at startup, so that should always be visible even when the camera is
 stuck — its absence indicates a process-level failure instead.
 
 **Capture starts but frames are corrupted / black.** The default pixel
-format is `MJPG`. Some older Logitech models only stream `YUYV` —
-override with `pixel_format:=YUYV` (and use `image_width:=640
-image_height:=480` so it fits in USB bandwidth).
+format is `YUYV`. Some cameras only stream high-resolution modes via
+`MJPG`; the apt-shipped `ros-humble-v4l2-camera` lacks MJPG decode, so
+you'll see frame drops or black output. Drop resolution
+(`image_width:=640 image_height:=480`) to stay in YUYV, or source-build
+v4l2_camera with MJPG decode for full-res capture.
 
 **Autofocus / autoexposure won't stay off.** `v4l2_camera` declares
 every V4L2 control as a ROS parameter and pushes the parameter's
@@ -574,16 +837,22 @@ calibration YAML exists. Run the intrinsic calibration; the result
 auto-loads next start.
 
 **Distances are accurate for some classes but wildly off for others.**
-The size in `object_sizes.py` doesn't match what you're seeing. Edit it.
+The per-class dimensions don't match your specimens. Edit
+[`config/object_dimensions.yaml`](config/object_dimensions.yaml) and
+relaunch — see [Per-class dimensions for picking-grade 3D output](#per-class-dimensions-for-picking-grade-3d-output).
 
 **Detector starts but no detections.** Confirm `camera_info` is arriving
 (`ros2 topic hz /camera_info`); the node waits for it before processing
 images. Check `~/debug_image` — if it's blank, the model isn't seeing any
 classes above `conf_threshold`.
 
-**`No size entry for class 'X'`.** Either YOLO is returning a class the
-size table doesn't cover (custom weights), or a class genuinely outside
-COCO. Add it to `object_sizes.py`.
+**`No dimensions for class 'X' in object_dimensions.yaml; using defaults`.**
+YOLO returned a class that isn't in your per-class dimensions YAML
+(custom weights or an out-of-COCO class). The detector still publishes
+a 3D pose using the default dimensions, but the centroid height +
+bbox size are placeholders. Add an entry for the class to
+[`config/object_dimensions.yaml`](config/object_dimensions.yaml) and
+relaunch.
 
 **Foxglove can't connect.** Confirm port 8765 is published
 (`docker compose --profile viz ps`) and that nothing else on Windows is
@@ -629,3 +898,42 @@ that pulls in a runtime dep the host's JetPack doesn't ship. The pinned
 last cu126 line that doesn't need cuDSS or cuSPARSELt; do not bump it
 without first confirming the new wheel's dlopen list against the
 host's JetPack release. `libopenblas0` is already in the apt list.
+
+**`rectify_node`: "Rectified topic '/image_rect' requested but camera
+publishing '/camera_info' is uncalibrated".** `v4l2_camera` couldn't
+load a valid calibration YAML — either `camera_info/camera.yaml`
+is missing, or the resolution in the YAML doesn't match the launch's
+`image_width`/`image_height`. After importing a 1280×720 calibration,
+launch with `image_width:=1280 image_height:=720` (or use
+`scripts/bringup.sh`, which sets these by default). The `camera_name`
+mismatch warning (e.g. `[logitech_brio] does not match imported`) is
+cosmetic — only `image_width/height` and `camera_matrix` matter.
+
+**ROS 2 topics across PCs: same `ROS_DOMAIN_ID` but topics not visible
+on either side.** Most often, the publishing container is on a Docker
+**bridge** network (the default `networks: [ros]` in the `vlm`
+service): DDS multicast doesn't traverse NAT cleanly. Three fixes,
+fastest to most invasive:
+
+1. **Switch `vlm` to `network_mode: host`** in
+   [docker-compose.jetson.yml](docker-compose.jetson.yml) — the container
+   gets the host's network stack, multicast discovery just works:
+
+   ```yaml
+   vlm:
+     <<: *vlm_base
+     container_name: vlm_vision
+     network_mode: host        # was: networks: [ros]
+   ```
+
+2. **Check `ROS_LOCALHOST_ONLY`** on both PCs. If `1`, DDS is
+   loopback-only — `unset ROS_LOCALHOST_ONLY` on the affected side.
+
+3. **Match `RMW_IMPLEMENTATION`** on both PCs (e.g.
+   `rmw_fastrtps_cpp` everywhere). Different RMWs interoperate via
+   RTPS in theory but have had bugs.
+
+If `network_mode: host` doesn't fix it, also check firewalls
+(default Fast DDS uses UDP 7400 for discovery + dynamic UDP 7410+ for
+data) and that the LAN switch isn't blocking multicast — `iperf -u
+-B 239.255.0.1` can confirm multicast reaches the peer.

@@ -1,0 +1,89 @@
+# Per-class real-world dimensions in metres.
+#
+# Used by vlm_detector_node when world-frame back-projection is active
+# (i.e. an extrinsic calibration has been loaded and table_z_world is
+# set). The class name keys MUST match YOLO's `result.names` strings
+# exactly (case-sensitive); add an entry for any class you care about.
+#
+# Per-class fields (all optional; defaults section fills in the rest):
+#   height : real vertical extent in metres in the pose YOLO usually
+#            sees the class in. Used to lift the centroid above the
+#            table plane (centroid_z = table_z + height/2).
+#   width  : extent across one horizontal axis. Populates
+#            BoundingBox3D.size.x.
+#   depth  : extent across the other horizontal axis. Populates
+#            BoundingBox3D.size.y. Defaults to width if absent.
+#   shape  : "box" | "cylinder" | "sphere". Informational only at this
+#            point -- planners can use it to choose a grasp strategy.
+#            Default: "box".
+#
+# Unknown classes (not listed here AND not in the COCO fallback below)
+# still get a world-frame pose using the `defaults` block; a once-per-
+# class warning is logged so you know to add them.
+#
+# Sources: foodstuffs measured / approximated for typical retail
+# specimens; rest are COCO medians (manufacturer specs / Wikipedia).
+# Tune for your domain.
+
+defaults:
+  height: 0.05
+  width: 0.05
+  depth: 0.05
+  shape: box
+
+classes:
+  # ---- Foodstuffs (primary domain for the picker) ----------------
+  apple:        { height: 0.075, width: 0.075, depth: 0.075, shape: sphere }
+  orange:       { height: 0.075, width: 0.075, depth: 0.075, shape: sphere }
+  banana:       { height: 0.035, width: 0.20,  depth: 0.04,  shape: cylinder }
+  carrot:       { height: 0.025, width: 0.18,  depth: 0.03,  shape: cylinder }
+  broccoli:     { height: 0.12,  width: 0.12,  depth: 0.12,  shape: sphere }
+  sandwich:     { height: 0.04,  width: 0.12,  depth: 0.12,  shape: box }
+  hot dog:      { height: 0.03,  width: 0.15,  depth: 0.04,  shape: cylinder }
+  pizza:        { height: 0.02,  width: 0.28,  depth: 0.28,  shape: cylinder }
+  donut:        { height: 0.03,  width: 0.10,  depth: 0.10,  shape: cylinder }
+  cake:         { height: 0.10,  width: 0.20,  depth: 0.20,  shape: cylinder }
+
+  # ---- Containers / cutlery (often on the same table) -----------
+  bowl:         { height: 0.08,  width: 0.18,  depth: 0.18,  shape: cylinder }
+  cup:          { height: 0.10,  width: 0.08,  depth: 0.08,  shape: cylinder }
+  bottle:       { height: 0.23,  width: 0.07,  depth: 0.07,  shape: cylinder }
+  wine glass:   { height: 0.22,  width: 0.08,  depth: 0.08,  shape: cylinder }
+  fork:         { height: 0.015, width: 0.20,  depth: 0.025, shape: box }
+  knife:        { height: 0.015, width: 0.25,  depth: 0.025, shape: box }
+  spoon:        { height: 0.015, width: 0.18,  depth: 0.04,  shape: box }
+
+  # ---- Common COCO classes (height-only; width/depth fall back) -
+  # Kept so the size-heuristic fallback (when no extrinsic / no
+  # table) still has data for the broader COCO set.
+  person:        { height: 1.70 }
+  bicycle:       { height: 1.10 }
+  car:           { height: 1.50 }
+  motorcycle:    { height: 1.20 }
+  bus:           { height: 3.20 }
+  truck:         { height: 2.80 }
+  traffic light: { height: 0.70 }
+  stop sign:     { height: 0.75 }
+  bench:         { height: 0.85 }
+  bird:          { height: 0.20 }
+  cat:           { height: 0.25 }
+  dog:           { height: 0.50 }
+  backpack:      { height: 0.50 }
+  handbag:       { height: 0.30 }
+  suitcase:      { height: 0.65 }
+  sports ball:   { height: 0.22, width: 0.22, depth: 0.22, shape: sphere }
+  chair:         { height: 0.90 }
+  couch:         { height: 0.85 }
+  potted plant:  { height: 0.40 }
+  dining table:  { height: 0.75 }
+  tv:            { height: 0.55 }
+  laptop:        { height: 0.025, width: 0.34, depth: 0.24, shape: box }
+  mouse:         { height: 0.04,  width: 0.10, depth: 0.06, shape: box }
+  keyboard:      { height: 0.03,  width: 0.45, depth: 0.15, shape: box }
+  cell phone:    { height: 0.01,  width: 0.07, depth: 0.15, shape: box }
+  book:          { height: 0.03,  width: 0.14, depth: 0.21, shape: box }
+  clock:         { height: 0.30 }
+  vase:          { height: 0.25, width: 0.10, depth: 0.10, shape: cylinder }
+  scissors:      { height: 0.01, width: 0.18, depth: 0.07, shape: box }
+  teddy bear:    { height: 0.30 }
+  toothbrush:    { height: 0.02, width: 0.18, depth: 0.02, shape: box }

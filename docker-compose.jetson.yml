@@ -77,7 +77,7 @@ x-vlm-base: &vlm_base
     - /dev:/dev
     - ./camera_info:/root/.ros/camera_info
   environment:
-    ROS_DOMAIN_ID: "0"
+    ROS_DOMAIN_ID: "42"
     RMW_IMPLEMENTATION: rmw_fastrtps_cpp
     # Capture device. Left empty so the per-service shell wrappers can
     # auto-resolve via /dev/v4l/by-id/usb-*${DEVICE_NAME_MATCH}*-video-index0
@@ -118,10 +118,20 @@ services:
 
   # Default service: camera + detector on GPU (device:=cuda:0 set in the
   # Dockerfile's CMD).
+  #
+  # network_mode: host (not the bridge network) is required for ROS 2
+  # DDS to be visible from other machines on the LAN. With the bridge
+  # network, the container's DDS announcements carry its 172.x bridge
+  # IP as the locator -- not routable from outside the host, so peers
+  # see the announcement but can't reach back to subscribe. With host
+  # networking the container shares the host's network stack, so
+  # announcements carry the host's LAN IP and bidirectional discovery
+  # works. Trade-off: any `ports:` mappings on this service are ignored
+  # (the bind is implicit on the host).
   vlm:
     <<: *vlm_base
     container_name: vlm_vision
-    networks: [ros]
+    network_mode: host
     restart: unless-stopped
 
   # Interactive control tuner. Opens qv4l2 with a live preview using the
@@ -142,13 +152,35 @@ services:
     container_name: vlm_tune
     network_mode: host
     environment:
-      ROS_DOMAIN_ID: "0"
+      ROS_DOMAIN_ID: "42"
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       CAMERA_DEVICE: ${CAMERA_DEVICE:-}
       DEVICE_NAME_MATCH: ${DEVICE_NAME_MATCH:-BRIO}
       DISPLAY: ${DISPLAY:-:0}
       XAUTHORITY: /tmp/.docker.xauth
       QT_X11_NO_MITSHM: "1"
+      # qv4l2 uses Qt's OpenGL widget for the video preview. Over SSH
+      # X11, GLX is forwarded but no hardware OpenGL is available --
+      # Qt reports "Unrecognized OpenGL version" then crashes. The fix
+      # is to force Mesa's llvmpipe software path:
+      #   LIBGL_ALWAYS_SOFTWARE=1     -> Mesa loads swrast_dri.so
+      #                                  instead of hardware drivers
+      #   QT_OPENGL=software          -> Qt prefers software GL paths
+      #   __GLX_VENDOR_LIBRARY_NAME   -> libglvnd dispatches GLX to
+      #                                  Mesa explicitly, not any
+      #                                  NVIDIA libGL that may be
+      #                                  bind-mounted in by the
+      #                                  nvidia container runtime.
+      # Do NOT set QT_XCB_GL_INTEGRATION=none -- that disables Qt's
+      # XCB-GL integration entirely, and qv4l2 then has no GL context
+      # to use at all ("Cannot create platform OpenGL context, neither
+      # GLX nor EGL are enabled").
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      QT_OPENGL: software
+      __GLX_VENDOR_LIBRARY_NAME: mesa
+      # Silences "QStandardPaths: XDG_RUNTIME_DIR not set, defaulting
+      # to '/tmp/runtime-root'" -- harmless but noisy.
+      XDG_RUNTIME_DIR: /tmp/runtime-root
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: all
       LD_LIBRARY_PATH: /usr/local/cuda/lib64:/usr/lib/aarch64-linux-gnu/nvidia:/usr/local/lib/python3.10/dist-packages/nvidia/cudnn/lib
@@ -193,7 +225,7 @@ services:
         DEV="$${DEV:-/dev/video0}"
         echo "[save-settings] camera device: $$DEV"
         exec /usr/local/bin/save_camera_settings.sh "$$DEV"
-    networks: [ros]
+    network_mode: host
     restart: "no"
 
   # Intrinsic / extrinsic calibration. Lands camera.yaml + extrinsics.yaml
@@ -203,22 +235,21 @@ services:
     <<: *vlm_base
     profiles: ["calibrate"]
     container_name: vlm_calibrate
-    networks: [ros]
+    network_mode: host
     command: >
       ros2 launch ros2_vlm_vision calibration.launch.py mode:=intrinsic
     restart: "no"
 
-  # Foxglove WebSocket bridge for in-browser visualisation. Bind to the
-  # Jetson's LAN IP (or use SSH tunnel) -- the port is published on the
-  # default bridge network.
+  # Foxglove WebSocket bridge for in-browser visualisation. Runs on
+  # host networking so it (a) shares the same DDS stack as the `vlm`
+  # service and (b) binds 0.0.0.0:8765 directly on the host LAN IP --
+  # the bridge is reachable from any LAN client (or via SSH tunnel).
   foxglove:
     <<: *vlm_base
     profiles: ["viz"]
     container_name: vlm_foxglove
     depends_on: [vlm]
-    networks: [ros]
-    ports:
-      - "8765:8765"
+    network_mode: host
     command: >
       ros2 run foxglove_bridge foxglove_bridge
       --ros-args
@@ -226,7 +257,3 @@ services:
       -p address:=0.0.0.0
       -p send_buffer_limit:=10000000
     restart: unless-stopped
-
-networks:
-  ros:
-    driver: bridge

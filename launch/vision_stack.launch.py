@@ -54,6 +54,7 @@ def _resolve_video_device(explicit: str, name_match: str) -> str:
 def _launch_setup(context, *_args, **_kwargs):
     pkg_share = get_package_share_directory('ros2_vlm_vision')
     detector_cfg = PathJoinSubstitution([pkg_share, 'config', 'detector.yaml'])
+    apriltag_cfg = PathJoinSubstitution([pkg_share, 'config', 'apriltag.yaml'])
 
     # image_size must reach ROS as an IntegerArray. LaunchConfigurations
     # resolve to strings, so resolve and cast here at substitution time.
@@ -99,13 +100,75 @@ def _launch_setup(context, *_args, **_kwargs):
         executable='vlm_detector_node',
         name='vlm_detector_node',
         output='screen',
-        parameters=[detector_cfg, {'device': LaunchConfiguration('device')}],
+        parameters=[
+            detector_cfg,
+            {
+                'device': LaunchConfiguration('device'),
+                'use_table_plane': LaunchConfiguration('use_table_plane'),
+                'table_z_world': LaunchConfiguration('table_z_world'),
+                'world_frame': LaunchConfiguration('world_frame'),
+            },
+        ],
+    )
+
+    # --- AprilTag stack (opt-in via apriltag:=true) -----------------
+    # When enabled, runs end-to-end: rectify -> apriltag_node ->
+    # extrinsics_publisher (loads world->camera from saved YAML) ->
+    # apriltag_world_publisher (republishes detections in world frame).
+    # Requires camera_info/extrinsics.yaml to exist (run the extrinsic
+    # calibration once first: `... calibration.launch.py mode:=extrinsic`).
+    apriltag_on = IfCondition(LaunchConfiguration('apriltag'))
+
+    rectify_node = Node(
+        package='image_proc',
+        executable='rectify_node',
+        name='rectify',
+        output='screen',
+        remappings=[
+            ('image', '/image_raw'),
+            ('camera_info', '/camera_info'),
+            ('image_rect', '/image_rect'),
+        ],
+        condition=apriltag_on,
+    )
+    apriltag_node = Node(
+        package='apriltag_ros',
+        executable='apriltag_node',
+        name='apriltag',
+        output='screen',
+        parameters=[apriltag_cfg],
+        remappings=[
+            ('image_rect', '/image_rect'),
+            ('camera_info', '/camera_info'),
+        ],
+        condition=apriltag_on,
+    )
+    extrinsics_pub_node = Node(
+        package='ros2_vlm_vision',
+        executable='extrinsics_publisher',
+        name='extrinsics_publisher',
+        output='screen',
+        parameters=[{
+            'yaml_path': LaunchConfiguration('extrinsics_yaml'),
+        }],
+        condition=apriltag_on,
+    )
+    apriltag_world_pub_node = Node(
+        package='ros2_vlm_vision',
+        executable='apriltag_world_publisher',
+        name='apriltag_world_publisher',
+        output='screen',
+        condition=apriltag_on,
     )
 
     return [
         LogInfo(msg=f'[ros2_vlm_vision] resolved video_device={video_device}'),
         camera_node,
         detector_node,
+        rectify_node,
+        apriltag_node,
+        extrinsics_pub_node,
+        apriltag_world_pub_node,
     ]
 
 
@@ -154,5 +217,39 @@ def generate_launch_description():
                         'host-mounted camera_info/ volume; produced by the '
                         'intrinsic calibration service. v4l2_camera warns '
                         'and falls back to zero intrinsics if absent.'),
+        DeclareLaunchArgument(
+            'use_table_plane', default_value='true',
+            description='When true AND the static world->camera TF is '
+                        'available (extrinsic calibration loaded), the '
+                        'detector projects each detection onto the '
+                        'world-frame table plane via ray-plane '
+                        'intersection and publishes detections with '
+                        'frame_id=world. Falls back to size-heuristic '
+                        'output in the camera frame when not available.'),
+        DeclareLaunchArgument(
+            'table_z_world', default_value='0.0',
+            description='Height (metres, world frame) of the table '
+                        'surface. With the apriltag anchor placed flat '
+                        'on the table during extrinsic calibration, '
+                        '0.0 is correct.'),
+        DeclareLaunchArgument(
+            'world_frame', default_value='world',
+            description='Name of the world TF frame the detector should '
+                        'transform poses into when use_table_plane is on.'),
+        DeclareLaunchArgument(
+            'apriltag', default_value='false',
+            description='Run the AprilTag detection + world-pose pipeline '
+                        '(rectify + apriltag_node + extrinsics_publisher + '
+                        'apriltag_world_publisher). Requires '
+                        'camera_info/extrinsics.yaml from a prior extrinsic '
+                        'calibration; the extrinsics_publisher will exit if '
+                        'absent.'),
+        DeclareLaunchArgument(
+            'extrinsics_yaml',
+            default_value='/root/.ros/camera_info/extrinsics.yaml',
+            description='Path inside the container to the YAML written by '
+                        'apriltag_extrinsic_latcher during extrinsic '
+                        'calibration. Read once at startup to publish the '
+                        'static world -> camera TF.'),
         OpaqueFunction(function=_launch_setup),
     ])
